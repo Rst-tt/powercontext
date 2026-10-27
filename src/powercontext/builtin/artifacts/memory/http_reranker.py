@@ -94,6 +94,7 @@ class HTTPMemoryReranker:
         query: str,
         candidates: tuple[MemoryHit, ...],
         limit: int,
+        /,
     ) -> MemoryRerankDecision:
         """Score the coarse pool in batches and keep the original ranks of the best hits."""
 
