@@ -21,6 +21,7 @@ import json
 
 import httpx
 import pytest
+
 from powercontext.artifacts import ArtifactRef
 from powercontext.builtin.artifacts.memory import MemoryEntryInput, MemoryHit
 from powercontext.builtin.artifacts.memory.http_reranker import HTTPMemoryReranker

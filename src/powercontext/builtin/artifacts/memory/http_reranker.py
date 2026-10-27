@@ -131,20 +131,17 @@ def _validated_scores(response: httpx.Response, *, expected: set[int]) -> list[t
 
     if not response.is_success:
         response.raise_for_status()
-        raise httpx.HTTPStatusError(
-            f"http reranker scoring service returned HTTP {response.status_code}",
-            request=response.request,
-            response=response,
-        )
     try:
         payload = HTTPMemoryRerankResponse.model_validate(response.json())
     except ValidationError as error:
-        raise ValueError(f"http reranker response does not match the scoring protocol: {error}") from error
+        raise ValueError(  # noqa: TRY003
+            f"http reranker response does not match the scoring protocol: {error}"
+        ) from error
     except ValueError as error:
-        raise ValueError("http reranker response is not valid JSON") from error
+        raise ValueError("http reranker response is not valid JSON") from error  # noqa: TRY003
     ranks = [item.rank for item in payload.scores]
     if len(ranks) != len(expected) or set(ranks) != expected:
-        raise ValueError("http reranker response does not cover the requested ranks exactly once")
+        raise ValueError("http reranker response does not cover the requested ranks exactly once")  # noqa: TRY003
     return [(item.rank, item.score) for item in payload.scores]
 
 
