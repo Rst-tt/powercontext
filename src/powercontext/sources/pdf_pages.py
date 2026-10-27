@@ -41,9 +41,11 @@ PDF_PAGE_SOURCE_VERSION: Final = "1"
 MAX_PDF_PAGE_TEXT_BYTES: Final = 8_192
 
 #: Retrieval tuning. A question is answered from a handful of evidence pages, so the
-#: ranking weighs structural signals 鈥?a statement page, a section heading, a numeric
-#: table 鈥?next to plain term overlap, and prefers pages of the document it names.
-_STATEMENT_WEIGHT: Final = 8.0
+#: ranking weighs structural signals - a statement page, a section heading, a numeric
+#: table - next to plain term overlap, and prefers pages of the document it names. The
+#: statement prior is the strongest of them: when a question asks for a reported line
+#: item the statement page is the evidence, and the pages that only discuss it are not.
+_STATEMENT_WEIGHT: Final = 16.0
 _HEADING_WEIGHT: Final = 1.0
 _DIGIT_WEIGHT: Final = 3.0
 _DOCUMENT_WEIGHT: Final = 20.0
@@ -659,13 +661,17 @@ def _rank(corpus: _Corpus, terms: Sequence[str], documents: dict[str, float]) ->
     """Order every page of the scope by how likely it carries the answer."""
 
     best = max(documents.values(), default=0.0)
+    distinct = _distinct(terms)
     scored: list[tuple[float, str, int, int, _Page]] = []
     for index, page in enumerate(corpus.pages):
+        #: A structural prior only refines a page that answers something: a page that
+        #: shares no term with the question is not evidence, whatever it presents.
+        matched = any(term in corpus.counts[index] for term in distinct)
         score = (
             corpus.bm25(index, terms)
             + _HEADING_WEIGHT * corpus.heading_overlap(index, terms)
             + _DIGIT_WEIGHT * corpus.digit_share(index)
-            + (_STATEMENT_WEIGHT if _is_statement_page(page.body) else 0.0)
+            + (_STATEMENT_WEIGHT if matched and _is_statement_page(page.body) else 0.0)
         )
         if best:
             score += _DOCUMENT_WEIGHT * documents.get(page.document_id, 0.0) / best
@@ -708,7 +714,9 @@ def _query_terms(question: str) -> tuple[str, ...]:
     sentences = [
         sentence for sentence in _SENTENCE_PATTERN.split(question) if not _INSTRUCTION_PATTERN.search(sentence)
     ]
-    terms = _TERM_PATTERN.findall(" ".join(sentences).lower())
+    text = _POSSESSIVE_PATTERN.sub("", " ".join(sentences).lower())
+    #: A single letter of "M&A" or "3M's" matches half of a report and says nothing on its own.
+    terms = [term for term in _TERM_PATTERN.findall(text) if len(term) > 1]
     return tuple(dict.fromkeys(term for term in terms if term not in _STOP_TERMS))
 
 
