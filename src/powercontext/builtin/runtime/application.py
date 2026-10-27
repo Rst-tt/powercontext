@@ -172,6 +172,7 @@ from powercontext.builtin.runtime.context_pack import (
     ContextPackDelta,
     ContextPackError,
     aligned_pack,
+    prepared_pack,
 )
 from powercontext.builtin.runtime.decision_model import DecisionModel
 from powercontext.builtin.runtime.errors import InvalidRuntimeRequestError, TopicMemoryProcessingUnavailableError
@@ -871,7 +872,7 @@ class ScopedContextApplication:
 
         context = await self.prepare(request, authorize_scopes=authorize_scopes)
         if base_pack is None:
-            return ContextPack.from_content(context.content)
+            return prepared_pack(context.content)
         if not isinstance(base_pack, ContextPack):
             raise ContextPackError("pack-invalid-base")
         return ContextPackDelta.between(base_pack, aligned_pack(base_pack, context.content))

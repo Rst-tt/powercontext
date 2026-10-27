@@ -165,7 +165,7 @@ class ContextPack:
     digest: str
 
     @classmethod
-    def build(cls, items: tuple[bytes, ...]) -> "ContextPack":
+    def build(cls, items: tuple[bytes, ...]) -> ContextPack:
         """Build a complete pack from already chunked bytes."""
 
         if isinstance(items, (bytes, bytearray, memoryview)) or not isinstance(items, (tuple, list)):
@@ -174,7 +174,7 @@ class ContextPack:
         return cls(items=chunks, digest=_digest({"schema": PACK_SCHEMA, "items": _encode_items(chunks)}))
 
     @classmethod
-    def from_content(cls, content: str | None, *, chunk_bytes: int = DEFAULT_CHUNK_BYTES) -> "ContextPack":
+    def from_content(cls, content: str | None, *, chunk_bytes: int = DEFAULT_CHUNK_BYTES) -> ContextPack:
         """Build a pack from one prepared context body.
 
         The body is split deterministically into chunks of at most
@@ -216,7 +216,7 @@ class ContextPack:
             count = len(encoded)
 
     @classmethod
-    def from_bytes(cls, data: bytes) -> "ContextPack":
+    def from_bytes(cls, data: bytes) -> ContextPack:
         """Parse and verify one serialized pack."""
 
         payload = _require_keys(_decode_payload(data, kind="pack"), _PACK_KEYS, kind="pack")
@@ -246,7 +246,7 @@ class ContextPackDelta:
     appended: tuple[bytes, ...]
 
     @classmethod
-    def between(cls, base: ContextPack, target: ContextPack) -> "ContextPackDelta":
+    def between(cls, base: ContextPack, target: ContextPack) -> ContextPackDelta:
         """Describe how to rebuild ``target`` from ``base``.
 
         The prefix is the longest run of leading chunks the two packs share.
@@ -255,7 +255,7 @@ class ContextPackDelta:
         """
 
         shared = 0
-        for left, right in zip(base.items, target.items):
+        for left, right in zip(base.items, target.items, strict=False):
             if left != right:
                 break
             shared += 1
@@ -285,7 +285,7 @@ class ContextPackDelta:
         return _canonical(payload)
 
     @classmethod
-    def from_bytes(cls, data: bytes) -> "ContextPackDelta":
+    def from_bytes(cls, data: bytes) -> ContextPackDelta:
         """Parse and verify one serialized delta."""
 
         payload = _require_keys(_decode_payload(data, kind="delta"), _DELTA_KEYS, kind="delta")
@@ -323,12 +323,83 @@ def apply_context_pack_delta(base: ContextPack, delta: ContextPackDelta) -> Cont
     return target
 
 
-def aligned_pack(
-    base: ContextPack,
-    content: str | None,
-    *,
-    chunk_bytes: int = DEFAULT_CHUNK_BYTES,
-) -> ContextPack:
+#: Chunk boundaries used by prepared bodies, in bytes from the start of the body.
+#:
+#: The leading window is cut finely because that is where two consecutive
+#: prepared bodies usually stop matching: the trust preamble, the markers and
+#: the start of the JSON envelope are shared, and the first citation, ranking
+#: order or memory revision ends the shared prefix after a few hundred bytes.
+#: Cutting on a fine grid there lets the delta keep that shared head instead of
+#: resending it. Past the window the grid widens, because a body that already
+#: diverged is resent in bulk anyway.
+_FINE_GRID_LIMIT = 1024
+_FINE_GRID_STEP = 64
+
+
+def _next_boundary(position: int) -> int:
+    """Return the first chunk boundary strictly after ``position``."""
+
+    fine = -(-(position + 1) // _FINE_GRID_STEP) * _FINE_GRID_STEP
+    if fine <= _FINE_GRID_LIMIT:
+        return fine
+    return _FINE_GRID_LIMIT + -(-(position + 1 - _FINE_GRID_LIMIT) // DEFAULT_CHUNK_BYTES) * DEFAULT_CHUNK_BYTES
+
+
+def _utf8_char_length(lead: int) -> int:
+    """Return the byte length of the UTF-8 character starting with ``lead``."""
+
+    if lead < 0x80:
+        return 1
+    if lead < 0xE0:
+        return 2
+    if lead < 0xF0:
+        return 3
+    return 4
+
+
+def _grid_chunks(body: bytes, *, start: int = 0) -> tuple[bytes, ...]:
+    """Split ``body[start:]`` on the prepared-body chunk grid.
+
+    Every chunk is valid UTF-8 on its own and no chunk exceeds
+    :data:`DEFAULT_CHUNK_BYTES`. Boundaries that fall inside a multi-byte
+    character move back to the previous character edge.
+    """
+
+    if start >= len(body):
+        return ()
+    boundaries: list[int] = []
+    position = start
+    while position < len(body):
+        boundary = min(_next_boundary(position), len(body))
+        while boundary > position and boundary < len(body) and (body[boundary] & 0xC0) == 0x80:
+            boundary -= 1
+        if boundary == position:
+            boundary = position + _utf8_char_length(body[position])
+        boundaries.append(boundary)
+        position = boundary
+    chunks: list[bytes] = []
+    previous = start
+    for boundary in boundaries:
+        chunks.append(body[previous:boundary])
+        previous = boundary
+    return tuple(chunks)
+
+
+def prepared_pack(content: str | None) -> ContextPack:
+    """Build the pack of one prepared context body on the prepared-body grid."""
+
+    if content is None:
+        return ContextPack.build(())
+    if isinstance(content, (bytes, bytearray, memoryview)):
+        body = bytes(content)
+    elif isinstance(content, str):
+        body = content.encode("utf-8")
+    else:
+        raise ContextPackError("pack-invalid-content")
+    return ContextPack.build(_grid_chunks(body))
+
+
+def aligned_pack(base: ContextPack, content: str | None) -> ContextPack:
     """Build the pack of ``content`` so that it reuses the base pack's chunks.
 
     The leading chunks of the result are the base pack's own chunks for as long
@@ -337,8 +408,6 @@ def aligned_pack(
     what actually changed.
     """
 
-    if type(chunk_bytes) is not int or chunk_bytes < 1:
-        raise ContextPackError("pack-invalid-chunk_bytes")
     body = b"" if content is None else content.encode("utf-8") if isinstance(content, str) else bytes(content)
     base_body = b"".join(base.items)
     shared_bytes = 0
@@ -354,8 +423,7 @@ def aligned_pack(
         kept += 1
     prefix = base.items[:kept]
     try:
-        b"".join(prefix).decode("utf-8")
         body[kept_bytes:].decode("utf-8")
     except UnicodeDecodeError:
-        return ContextPack.from_content(content, chunk_bytes=chunk_bytes)
-    return ContextPack.build((*prefix, *_chunk_bytes(body[kept_bytes:], chunk_bytes=chunk_bytes)))
+        return prepared_pack(content)
+    return ContextPack.build((*prefix, *_grid_chunks(body, start=kept_bytes)))
