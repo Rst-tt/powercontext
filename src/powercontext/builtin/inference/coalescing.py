@@ -51,7 +51,6 @@ class _Batch:
     future: asyncio.Future[EmbeddingResult]
     vectors: dict[str, EmbeddingVector] = field(default_factory=dict)
     usage: InferenceUsage | None = None
-    dispatched: bool = False
     task: asyncio.Task[None] | None = None
 
 
@@ -62,7 +61,9 @@ class _Namespace:
     call: EmbedCall
     cache: OrderedDict[str, EmbeddingVector] = field(default_factory=OrderedDict)
     batches: dict[str, _Batch] = field(default_factory=dict)
-    pending: list[_Batch] = field(default_factory=list)
+    # The batch still accepting texts inside its coalescing window; a dispatched
+    # batch leaves this slot because provider requests cannot grow afterwards.
+    filling: _Batch | None = None
 
 
 def _consume_failure(future: asyncio.Future[EmbeddingResult]) -> None:
@@ -155,21 +156,15 @@ class CoalescingEmbeddingModel:
             if existing is not None:
                 claimed[text] = existing
                 continue
-            batch = self._free_batch(namespace)
-            if batch is None:
+            batch = namespace.filling
+            if batch is None or len(batch.texts) >= self._max_batch_size:
                 batch = _Batch(namespace=namespace, texts=[], future=self._future())
-                namespace.pending.append(batch)
+                namespace.filling = batch
                 batch.task = asyncio.create_task(self._dispatch(batch))
             batch.texts.append(text)
             namespace.batches[text] = batch
             claimed[text] = batch
         return claimed
-
-    def _free_batch(self, namespace: _Namespace) -> _Batch | None:
-        for batch in namespace.pending:
-            if not batch.dispatched and len(batch.texts) < self._max_batch_size:
-                return batch
-        return None
 
     async def _dispatch(self, batch: _Batch) -> None:
         try:
@@ -177,14 +172,10 @@ class CoalescingEmbeddingModel:
         except asyncio.CancelledError:
             self._abandon(batch)
             raise
-        texts = tuple(batch.texts)
-        batch.dispatched = True
-        pending = batch.namespace.pending
-        for index, candidate in enumerate(pending):
-            if candidate is batch:
-                del pending[index]
-                break
-        await self._run(batch, texts)
+        namespace = batch.namespace
+        if namespace.filling is batch:
+            namespace.filling = None
+        await self._run(batch, tuple(batch.texts))
 
     async def _run(self, batch: _Batch, texts: tuple[str, ...]) -> None:
         namespace = batch.namespace
@@ -219,6 +210,8 @@ class CoalescingEmbeddingModel:
 
     def _abandon(self, batch: _Batch) -> None:
         namespace = batch.namespace
+        if namespace.filling is batch:
+            namespace.filling = None
         for text in batch.texts:
             namespace.batches.pop(text, None)
         if not batch.future.done():
