@@ -208,6 +208,25 @@ class RuntimeConfig(BaseModel):
     dream_budget: DreamBudget = Field(default_factory=DreamBudget)
     topic_memory_schedule_seconds: float | None = Field(default=None, gt=0)
     topic_memory_source_window_limit: int = Field(default=10, ge=1)
+    # A count trigger admits one processing invocation once a Scope owes the
+    # Family this many persisted Source identities. None keeps the count
+    # trigger disabled, so only the time condition and explicit flushes start
+    # processing.
+    memory_source_count_threshold: int | None = Field(default=None, ge=1)
+    topic_memory_source_count_threshold: int | None = Field(default=None, ge=1)
+
+    @field_validator("memory_source_count_threshold", "topic_memory_source_count_threshold", mode="before")
+    @classmethod
+    def validate_source_count_threshold(cls, value: Any) -> Any:
+        # A count trigger is a strict positive integer. Booleans, floats, and
+        # numeric strings are rejected instead of coerced, so one configured
+        # threshold can never mean two different counts.
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("Source count threshold must be a positive integer")  # noqa: TRY003, TRY004
+        return value
+
     topic_memory_history_max_candidates: int = Field(default=20, ge=1, le=MAX_TOPIC_MEMORY_SEARCH_LIMIT)
     topic_memory_history_rrf_threshold: int = Field(default=70, ge=0, le=100)
     topic_memory_history_min_candidates: int = Field(default=5, ge=1, le=MAX_TOPIC_MEMORY_SEARCH_LIMIT)

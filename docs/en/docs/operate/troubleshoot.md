@@ -293,7 +293,7 @@ so the previous database remains available for recovery:
 
    ```bash
    obloader <connection-options> -D <new-database> --csv \
-     --table 'pc_profile_policies' \
+     --table 'pc_profile_policies,pc_source_lifecycle_nodes' \
      -f <export-directory>
    ```
 

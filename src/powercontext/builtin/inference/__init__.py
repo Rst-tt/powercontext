@@ -18,6 +18,7 @@ Pydantic AI remains optional and is imported only from
 ``powercontext.builtin.inference.pydantic_ai``.
 """
 
+from powercontext.builtin.inference.coalescing import CoalescingEmbeddingModel
 from powercontext.builtin.inference.errors import (
     InferenceConfigurationError,
     InferenceError,
@@ -40,6 +41,7 @@ from powercontext.builtin.inference.protocols import (
 from powercontext.builtin.inference.tokens import TokenEstimator, TokenEstimatorProfile, character_token_estimator
 
 __all__ = [
+    "CoalescingEmbeddingModel",
     "EmbeddingModel",
     "EmbeddingResult",
     "EmbeddingVector",

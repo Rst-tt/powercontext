@@ -284,7 +284,7 @@ collation，但不会包含数据库 URL 或凭据。
 
    ```bash
    obloader <connection-options> -D <new-database> --csv \
-     --table 'pc_profile_policies' \
+     --table 'pc_profile_policies,pc_source_lifecycle_nodes' \
      -f <export-directory>
    ```
 

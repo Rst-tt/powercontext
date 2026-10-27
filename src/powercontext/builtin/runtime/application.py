@@ -144,6 +144,7 @@ from powercontext.builtin.persistence.artifact_governance import (
     ArtifactLifecycleState,
 )
 from powercontext.builtin.persistence.skill_publications import SkillPublication
+from powercontext.builtin.persistence.source_lifecycle import SourceLifecycleStore
 from powercontext.builtin.publication import ArtifactPublicationApplication
 from powercontext.builtin.records import (
     ArtifactCreated,
@@ -165,6 +166,12 @@ from powercontext.builtin.runtime._scope_cache import (
     ScopeCache,
     ScopeCacheObserver,
     ScopeEvictor,
+)
+from powercontext.builtin.runtime.context_pack import (
+    ContextPack,
+    ContextPackDelta,
+    ContextPackError,
+    aligned_pack,
 )
 from powercontext.builtin.runtime.decision_model import DecisionModel
 from powercontext.builtin.runtime.errors import InvalidRuntimeRequestError, TopicMemoryProcessingUnavailableError
@@ -248,6 +255,7 @@ from powercontext.builtin.runtime.recall_sufficiency import (
     build_recall_candidates,
     recall_effort,
 )
+from powercontext.builtin.runtime.source_lifecycle import SourceLifecycleApplication
 from powercontext.builtin.runtime.statistics import RelationalScopedStatistics, overview_selection
 from powercontext.builtin.scope import ScopeApplication, ScopeDescriptor, ScopeSelection
 from powercontext.builtin.scope.subject_sources import SubjectSourceService
@@ -847,8 +855,30 @@ class ScopedContextApplication:
                 await authorize_scopes((self.scope_id, *scope.context_references))
             return await self._prepare(request, scope)
 
+    async def prepare_incremental(
+        self,
+        request: PrepareContextRequest,
+        base_pack: ContextPack | None = None,
+        *,
+        authorize_scopes: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
+    ) -> ContextPack | ContextPackDelta:
+        """Prepare the same body as :meth:`prepare` and hand it over as a pack.
+
+        Without a base pack the whole body is returned as one complete pack.
+        With a base pack only the difference is returned, so a caller that
+        already holds the base pack can rebuild the current body from it.
+        """
+
+        context = await self.prepare(request, authorize_scopes=authorize_scopes)
+        if base_pack is None:
+            return ContextPack.from_content(context.content)
+        if not isinstance(base_pack, ContextPack):
+            raise ContextPackError("pack-invalid-base")
+        return ContextPackDelta.between(base_pack, aligned_pack(base_pack, context.content))
+
     async def _prepare(self, request: PrepareContextRequest, scope: ScopeDescriptor, /) -> PreparedContext:
         build, effort = await self._prepare_build(request, scope)
+
         if effort is not None and self._runtime._recall_effort_sink is not None:
             try:
                 await self._runtime._recall_effort_sink(effort)
@@ -2667,6 +2697,7 @@ class ScopedTopicMemoryApplication:
                     query_embedding,
                     embedding_timeout_seconds,
                 )
+        result = await self._without_unsupported_hits(result)
         observer = self._runtime._topic_memory_search_observer
         if observer is not None:
             try:
@@ -2684,6 +2715,20 @@ class ScopedTopicMemoryApplication:
                     },
                 )
         return result
+
+    async def _without_unsupported_hits(self, result: TopicMemorySearchResult) -> TopicMemorySearchResult:
+        """Drop the hits whose Topic Memory lost the Source support it depends on."""
+
+        lifecycle = self._runtime._source_lifecycle
+        if lifecycle is None or not result.hits:
+            return result
+        withdrawn = await lifecycle.withdrawn_topic_artifact_ids(self.scope_id)
+        if not withdrawn:
+            return result
+        supported = tuple(hit for hit in result.hits if hit.artifact_ref.artifact_id not in withdrawn)
+        if len(supported) == len(result.hits):
+            return result
+        return result.model_copy(update={"hits": supported})
 
     async def _search_with_embedding(
         self,
@@ -3013,6 +3058,7 @@ class BuiltinRuntime:
         remote_skill_distribution: RemoteSkillDistributionService | None = None,
         statistics_service: StatisticsServiceFactory | None = None,
         record_service: RecordService | None = None,
+        source_lifecycle: SourceLifecycleStore | None = None,
         prompt_service: PromptService | None = None,
         recall_token_estimator: RecallTokenEstimator | None = None,
         recall_effort_sink: RecallEffortSink | None = None,
@@ -3069,6 +3115,7 @@ class BuiltinRuntime:
         self._remote_skill_distribution = remote_skill_distribution
         self._statistics_service = statistics_service
         self._record_service = record_service
+        self._source_lifecycle = source_lifecycle
         self._prompt_service = prompt_service
         self._recall_token_estimator = recall_token_estimator
         self._recall_effort_sink = recall_effort_sink
@@ -3111,6 +3158,7 @@ class BuiltinRuntime:
         self.memory = MemoryApplication(self)
         self.topic_memory = TopicMemoryApplication(self)
         self.records = RecordApplication(self)
+        self.lifecycle = SourceLifecycleApplication(self)
         self.prompts = PromptApplication(self)
         self.review = ReviewApplication(self)
         self.skill = SkillApplication(self)

@@ -14,6 +14,8 @@
 
 """Artifact-native Memory domain and service contracts."""
 
+from typing import TYPE_CHECKING, Any
+
 from powercontext.builtin.artifacts.memory.errors import (
     CapabilityNotSupportedError,
     InvalidEmbeddingError,
@@ -105,6 +107,18 @@ from powercontext.builtin.artifacts.memory.reranking import (
 )
 from powercontext.builtin.artifacts.memory.service import MemoryRememberMode, MemoryService
 
+if TYPE_CHECKING:
+    from powercontext.builtin.artifacts.memory.http_reranker import HTTPMemoryReranker
+
+
+def __getattr__(name: str) -> Any:
+    if name == "HTTPMemoryReranker":
+        from powercontext.builtin.artifacts.memory import http_reranker
+
+        return http_reranker.HTTPMemoryReranker
+    raise AttributeError(name)
+
+
 __all__ = [
     "CONVERSATION_MEMORY_EXTRACTION_INSTRUCTIONS",
     "CONVERSATION_MEMORY_EXTRACTION_INSTRUCTIONS_VERSION",
@@ -116,6 +130,7 @@ __all__ = [
     "CapabilityNotSupportedError",
     "DefaultMemoryEvidenceProjector",
     "EmbeddingProfile",
+    "HTTPMemoryReranker",
     "InvalidEmbeddingError",
     "InvalidMemoryCandidateError",
     "InvalidMemoryCitationError",

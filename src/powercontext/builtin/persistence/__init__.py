@@ -45,6 +45,11 @@ from powercontext.builtin.persistence.skill_publications import (
     SkillPublicationRepository,
 )
 from powercontext.builtin.persistence.source_definitions import SourceDefinitionManifestRepository
+from powercontext.builtin.persistence.source_lifecycle import (
+    SourceLifecycleNode,
+    SourceLifecycleRepository,
+    SourceLifecycleStore,
+)
 from powercontext.builtin.persistence.statistics import (
     StatisticsRepository,
     StoredInventoryCounts,
@@ -97,8 +102,10 @@ __all__ = (
     "SkillPublicationDesiredState",
     "SkillPublicationRepository",
     "SourceDefinitionManifestRepository",
-    "StatisticsRepository",
-    "StoredArtifactProcessingBindingState",
+    "SourceLifecycleNode",
+    "SourceLifecycleRepository",
+    "SourceLifecycleStore",
+    "StatisticsRepository",    "StoredArtifactProcessingBindingState",
     "StoredArtifactProcessingLease",
     "StoredInventoryCounts",
     "StoredModelUsage",

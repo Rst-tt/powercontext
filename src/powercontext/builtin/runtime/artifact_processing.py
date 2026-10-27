@@ -58,6 +58,7 @@ from powercontext.builtin.persistence.supervision import (
     database_utc_now,
 )
 from powercontext.builtin.persistence.tables import ARTIFACT_PROCESSING_INTENTS_TABLE, ARTIFACT_PROCESSING_LEASES_TABLE
+from powercontext.builtin.runtime.processing_count import SourceCountScanner
 from powercontext.builtin.runtime.processing_contracts import (
     ArtifactProcessingWorkAssignment,
     ArtifactProcessingWorkerCompletion,
@@ -76,6 +77,8 @@ _RETRY_BASE_SECONDS = 30.0
 _RETRY_CAP_SECONDS = 1800.0
 _CONTROL_CONFLICT_RETRY_SECONDS = 0.1
 _DISCOVERY_PAGE_SIZE = 100
+_COUNT_DISCOVERY_INTERVAL_SECONDS = 1.0
+_COUNT_DISCOVERY_TIMEOUT_SECONDS = 2.0
 _RETRY_STATE_LIMIT = 1000
 _CHANNEL_QUEUE_LIMIT = _DISCOVERY_PAGE_SIZE // 2
 _DISCOVERY_PAGE_DELAY_SECONDS = 0.01
@@ -110,6 +113,10 @@ class ArtifactProcessingBinding:
     max_workers: int = 1
     worker_timeout_seconds: float = 600.0
     automatic_processing_interval: timedelta | None = None
+    # A count trigger admits one invocation when a Scope owes this Family the
+    # configured number of persisted Source identities. None keeps the count
+    # trigger disabled.
+    source_count_threshold: int | None = None
     cron: str | None = None
     timezone: str = "Asia/Shanghai"
     config_prefix: str | None = None
@@ -138,6 +145,9 @@ class ArtifactProcessingBinding:
                 raise ValueError("interval and cron cannot both be enabled")  # noqa: TRY003
         if self.cron is not None:
             CronTrigger.from_crontab(self.cron, timezone=ZoneInfo(self.timezone))
+        if self.source_count_threshold is not None:
+            if type(self.source_count_threshold) is not int or self.source_count_threshold < 1:
+                raise ValueError("source count threshold must be a positive integer")  # noqa: TRY003
 
 
 class _WorkerResultSender(Protocol):
@@ -392,6 +402,8 @@ class _FamilyState:
     running: dict[str, _RunningWorker] = field(default_factory=dict)
     retries: dict[str, _RetryState] = field(default_factory=dict)
     requested_after: int = 0
+    count_after: str | None = None
+    next_count_at: float = 0.0
     scan_after: int = 0
     scan_generation: int = 0
     scan_in_progress: bool = False
@@ -443,6 +455,9 @@ class ArtifactProcessingSupervisor:
             raise ValueError("dedicated Supervisor must own exactly its named Family")  # noqa: TRY003
         self._database = database
         self._families = {binding.binding_name: _FamilyState(binding) for binding in bindings}
+        self._count_scanners = {
+            binding.binding_name: SourceCountScanner(binding.binding_name) for binding in bindings
+        }
         self._lease_mode = lease_mode
         self._supervisor_group = supervisor_group
         self._intents = intents or ArtifactProcessingIntentRepository()
@@ -633,8 +648,56 @@ class ArtifactProcessingSupervisor:
                     self._log_failure(state, None, error, "scope_discovery")
                 finally:
                     state.discovery_seconds = asyncio.get_running_loop().time() - now
+            if state.binding.source_count_threshold is not None and now >= state.next_count_at:
+                try:
+                    async with asyncio.timeout(_COUNT_DISCOVERY_TIMEOUT_SECONDS):
+                        await self._discover_count(state)
+                except ArtifactProcessingLeadershipLostError:
+                    raise
+                except Exception as error:
+                    state.degraded = True
+                    self._log_failure(state, None, error, "count_discovery")
             await self._activate_retries(state)
             await self._dispatch(state)
+
+    async def _discover_count(self, state: _FamilyState) -> None:
+        """Accept one invocation per Scope whose pending Source count reached the threshold.
+
+        The count trigger is a peer of the time condition: it admits exactly one
+        invocation when a Scope owes the Family enough persisted Source
+        identities. Already accepted work keeps its own invocation, so a
+        failed call is never discarded and its Sources stay pending.
+        """
+
+        binding = state.binding
+        threshold = binding.source_count_threshold
+        if threshold is None:
+            return
+        state.next_count_at = asyncio.get_running_loop().time() + _COUNT_DISCOVERY_INTERVAL_SECONDS
+        capacity = self._fresh_capacity(state)
+        if capacity <= 0:
+            return
+        scanner = self._count_scanners[binding.binding_name]
+        admitted: list[str] = []
+        async with self._database.transaction() as connection:
+            await self._leases.require_fence(connection, self._require_current_fence())
+            page = await scanner.pending_counts(connection, state.count_after, _DISCOVERY_PAGE_SIZE)
+            for scope_id, pending in page.counts:
+                if pending < threshold:
+                    continue
+                if len(admitted) >= capacity:
+                    break
+                if scope_id in state.queued or scope_id in state.running or scope_id in state.retries:
+                    continue
+                row = await self._intents.load(connection, scope_id, binding.binding_name, for_update=True)
+                if row is not None and row.requested_generation > row.handled_generation:
+                    # An accepted invocation already owns this Scope's Sources.
+                    continue
+                await self._intents.request(connection, scope_id, binding.binding_name)
+                admitted.append(scope_id)
+            state.count_after = page.next_after
+        for scope_id in admitted:
+            self._enqueue(state, scope_id)
 
     async def _discover(self, state: _FamilyState) -> None:
         binding = state.binding
@@ -1058,6 +1121,7 @@ class ArtifactProcessingSupervisor:
             state.overflow_not_before = 0.0
             state.retries.clear()
             state.requested_after = state.scan_after = state.scan_generation = 0
+            state.count_after = None
             state.scan_in_progress = False
             state.discovery_pending = True
 
@@ -1093,6 +1157,10 @@ class ArtifactProcessingSupervisor:
                 continue
             if state.next_schedule_at is not None:
                 deadlines.append(state.next_schedule_at)
+            if state.binding.source_count_threshold is not None:
+                # A count trigger has no schedule of its own, so the Supervisor
+                # must wake to measure pending Sources.
+                deadlines.append(state.next_count_at)
             if state.discovery_pending or state.scan_in_progress or not state.reconcile_complete or state.degraded:
                 deadlines.append(max(now, state.next_discovery_at))
         return None if not deadlines else max(0.001, min(deadlines) - now)

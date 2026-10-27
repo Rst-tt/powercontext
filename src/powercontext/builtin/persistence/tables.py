@@ -51,6 +51,7 @@ from powercontext.limits import (
     MAX_SCOPE_SUMMARY_LENGTH,
     MAX_SCOPE_TITLE_LENGTH,
     MAX_SOURCE_ID_LENGTH,
+    MAX_SOURCE_LIFECYCLE_NODE_ID_LENGTH,
     MAX_SOURCE_TYPE_LENGTH,
 )
 
@@ -1180,6 +1181,55 @@ RECURRENCE_OBSERVATION_TABLE = Table(
 
 RECURRENCE_TABLES = (RECURRENCE_MATCH_TABLE, RECURRENCE_OBSERVATION_TABLE)
 
+# One row per Source lifecycle node registered in a Scope. The row owns the
+# binding (kind, canonical reference, parent edges, policy) and the current
+# availability, so a restart replays the same graph without re-reading the
+# native Memory or Topic Memory projections.
+SOURCE_LIFECYCLE_NODES_TABLE = Table(
+    "pc_source_lifecycle_nodes",
+    SHARED_METADATA,
+    Column("scope_id", identity_string(MAX_SCOPE_ID_LENGTH), primary_key=True),
+    Column("node_id", identity_string(MAX_SOURCE_LIFECYCLE_NODE_ID_LENGTH), primary_key=True),
+    # Registration order is the topological order of the dependency graph.
+    Column("ordinal", Integer, nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("policy", String(8), nullable=False),
+    Column("reference", _canonical_payload_type(), nullable=False),
+    Column("parents", _canonical_payload_type(), nullable=False),
+    Column("source_revision", Integer),
+    Column("sequence", Integer),
+    Column("event_digest", identity_string(64)),
+    Column("artifact_id", identity_string(MAX_ARTIFACT_ID_LENGTH)),
+    Column("available", Integer, nullable=False),
+    ForeignKeyConstraint(("scope_id",), ("pc_scopes.scope_id",), ondelete="CASCADE"),
+    CheckConstraint(
+        "kind IN ('source', 'memory', 'topic')",
+        name="ck_pc_source_lifecycle_nodes_kind",
+    ),
+    CheckConstraint(
+        "policy IN ('all', 'any')",
+        name="ck_pc_source_lifecycle_nodes_policy",
+    ),
+    CheckConstraint(
+        "available IN (0, 1)",
+        name="ck_pc_source_lifecycle_nodes_available",
+    ),
+    CheckConstraint(
+        "ordinal >= 0",
+        name="ck_pc_source_lifecycle_nodes_ordinal_nonnegative",
+    ),
+    CheckConstraint(
+        "sequence IS NULL OR sequence > 0",
+        name="ck_pc_source_lifecycle_nodes_sequence_positive",
+    ),
+    CheckConstraint(
+        "source_revision IS NULL OR source_revision > 0",
+        name="ck_pc_source_lifecycle_nodes_source_revision_positive",
+    ),
+)
+
+SOURCE_LIFECYCLE_TABLES = (SOURCE_LIFECYCLE_NODES_TABLE,)
+
 BUILTIN_TABLES = (
     SCOPE_TABLES
     + SHARED_TABLES
@@ -1187,5 +1237,6 @@ BUILTIN_TABLES = (
     + MEMORY_TABLES
     + STATISTICS_TABLES
     + RECURRENCE_TABLES
+    + SOURCE_LIFECYCLE_TABLES
     + (ARTIFACT_TAGS_TABLE, DREAM_RUNS_TABLE, RECEIPT_MIGRATION_REVIEW_TABLE)
 )
