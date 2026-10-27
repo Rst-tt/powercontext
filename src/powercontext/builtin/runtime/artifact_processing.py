@@ -58,7 +58,6 @@ from powercontext.builtin.persistence.supervision import (
     database_utc_now,
 )
 from powercontext.builtin.persistence.tables import ARTIFACT_PROCESSING_INTENTS_TABLE, ARTIFACT_PROCESSING_LEASES_TABLE
-from powercontext.builtin.runtime.processing_count import SourceCountScanner
 from powercontext.builtin.runtime.processing_contracts import (
     ArtifactProcessingWorkAssignment,
     ArtifactProcessingWorkerCompletion,
@@ -68,6 +67,7 @@ from powercontext.builtin.runtime.processing_contracts import (
     ArtifactProcessingWorkerOutcome,
     WorkerEntrypoint,
 )
+from powercontext.builtin.runtime.processing_count import SourceCountScanner
 from powercontext.builtin.runtime.protocols import RuntimeTracing
 
 logger = logging.getLogger(__name__)
@@ -101,6 +101,13 @@ class ArtifactProcessingPendingProvider(Protocol):
     async def reconcile(self, after_scope_id: str | None, limit: int, *, fence: ArtifactProcessingFence) -> str | None:
         """Return the next keyset position, or None when this pass is complete."""
         ...
+
+
+def _require_source_count_threshold(value: int | None) -> None:
+    """Reject a threshold that cannot mean one unambiguous count."""
+
+    if value is not None and (type(value) is not int or value < 1):
+        raise ValueError("source count threshold must be a positive integer")  # noqa: TRY003
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,9 +152,7 @@ class ArtifactProcessingBinding:
                 raise ValueError("interval and cron cannot both be enabled")  # noqa: TRY003
         if self.cron is not None:
             CronTrigger.from_crontab(self.cron, timezone=ZoneInfo(self.timezone))
-        if self.source_count_threshold is not None:
-            if type(self.source_count_threshold) is not int or self.source_count_threshold < 1:
-                raise ValueError("source count threshold must be a positive integer")  # noqa: TRY003
+        _require_source_count_threshold(self.source_count_threshold)
 
 
 class _WorkerResultSender(Protocol):
@@ -455,9 +460,7 @@ class ArtifactProcessingSupervisor:
             raise ValueError("dedicated Supervisor must own exactly its named Family")  # noqa: TRY003
         self._database = database
         self._families = {binding.binding_name: _FamilyState(binding) for binding in bindings}
-        self._count_scanners = {
-            binding.binding_name: SourceCountScanner(binding.binding_name) for binding in bindings
-        }
+        self._count_scanners = {binding.binding_name: SourceCountScanner(binding.binding_name) for binding in bindings}
         self._lease_mode = lease_mode
         self._supervisor_group = supervisor_group
         self._intents = intents or ArtifactProcessingIntentRepository()
@@ -600,6 +603,7 @@ class ArtifactProcessingSupervisor:
             state.discovery_pending = True
             state.reconcile_complete = False
             state.reconcile_after = None
+            state.count_after = None
         if self._lease_mode == "oceanbase":
             self._renew_task = asyncio.create_task(self._renew(), name=f"artifact-lease-{self._supervisor_group}")
 
@@ -682,11 +686,14 @@ class ArtifactProcessingSupervisor:
         async with self._database.transaction() as connection:
             await self._leases.require_fence(connection, self._require_current_fence())
             page = await scanner.pending_counts(connection, state.count_after, _DISCOVERY_PAGE_SIZE)
-            for scope_id, pending in page.counts:
-                if pending < threshold:
-                    continue
+            counts = page.counts
+            examined = 0
+            for scope_id, pending in counts:
                 if len(admitted) >= capacity:
                     break
+                examined += 1
+                if pending < threshold:
+                    continue
                 if scope_id in state.queued or scope_id in state.running or scope_id in state.retries:
                     continue
                 row = await self._intents.load(connection, scope_id, binding.binding_name, for_update=True)
@@ -695,7 +702,9 @@ class ArtifactProcessingSupervisor:
                     continue
                 await self._intents.request(connection, scope_id, binding.binding_name)
                 admitted.append(scope_id)
-            state.count_after = page.next_after
+            # Resume after the last Scope this pass examined: a free slot that ran
+            # out mid-page must not hide the rest of the page until the next sweep.
+            state.count_after = page.next_after if examined == len(counts) else counts[examined - 1][0]
         for scope_id in admitted:
             self._enqueue(state, scope_id)
 
@@ -1145,6 +1154,10 @@ class ArtifactProcessingSupervisor:
         now = asyncio.get_running_loop().time()
         deadlines: list[float] = []
         for state in self._families.values():
+            if state.binding.source_count_threshold is not None:
+                # A count trigger has no schedule of its own, so the Supervisor
+                # must wake to measure pending Sources.
+                deadlines.append(state.next_count_at)
             if len(state.running) >= state.binding.max_workers:
                 continue
             deadlines.extend(
@@ -1157,10 +1170,6 @@ class ArtifactProcessingSupervisor:
                 continue
             if state.next_schedule_at is not None:
                 deadlines.append(state.next_schedule_at)
-            if state.binding.source_count_threshold is not None:
-                # A count trigger has no schedule of its own, so the Supervisor
-                # must wake to measure pending Sources.
-                deadlines.append(state.next_count_at)
             if state.discovery_pending or state.scan_in_progress or not state.reconcile_complete or state.degraded:
                 deadlines.append(max(now, state.next_discovery_at))
         return None if not deadlines else max(0.001, min(deadlines) - now)

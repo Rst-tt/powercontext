@@ -28,7 +28,7 @@ from powercontext.builtin.persistence.supervision import (
     ArtifactProcessingBindingStateRepository,
     ArtifactProcessingLeaseRepository,
 )
-from powercontext.builtin.persistence.tables import SHARED_TABLES
+from powercontext.builtin.persistence.tables import SHARED_TABLES, SOURCE_JOURNAL_HEADS_TABLE
 from powercontext.builtin.runtime import artifact_processing as processing
 from powercontext.builtin.runtime.artifact_processing import ArtifactProcessingBinding, ArtifactProcessingSupervisor
 from powercontext.builtin.runtime.processing_contracts import (
@@ -627,5 +627,76 @@ def test_overflow_flush_cannot_advance_retry_and_cached_failures_cannot_extend_g
                 assert attempts["overflow"][1] - attempts["overflow"][0] >= 0.78
                 assert supervisor.max_resident <= 1 + 4 + 1
                 assert (await _intent(profile.database, "memory-binding", "healthy-tail")).handled_generation == 1
+
+    asyncio.run(scenario())
+
+
+async def _write_journal_head(database, scope, position, *, insert):
+    heads = SOURCE_JOURNAL_HEADS_TABLE
+    statement = (
+        heads.insert().values(scope_id=scope, position=position)
+        if insert
+        else heads.update().where(heads.c.scope_id == scope).values(position=position)
+    )
+    async with database.transaction() as connection:
+        await connection.execute(statement)
+
+
+def test_source_count_threshold_is_a_strict_positive_integer_or_absent():
+    as_configured = ArtifactProcessingBinding("memory-binding", "memory", _Launcher(None))
+    assert as_configured.source_count_threshold is None
+    admitted = ArtifactProcessingBinding("memory-binding", "memory", _Launcher(None), source_count_threshold=1)
+    assert admitted.source_count_threshold == 1
+    for rejected in (0, -1, True, 1.0, "3"):
+        with pytest.raises(ValueError, match="source count threshold"):
+            ArtifactProcessingBinding("memory-binding", "memory", _Launcher(None), source_count_threshold=rejected)
+
+
+def test_source_count_threshold_admits_one_call_per_scope_that_owes_enough_sources(tmp_path):
+    async def scenario():
+        async with _profile(tmp_path, "count-threshold") as profile:
+            await _write_journal_head(profile.database, "ready", 3, insert=True)
+            await _write_journal_head(profile.database, "quiet", 2, insert=True)
+            launcher = _Launcher(profile.database)
+            # The count trigger is the only trigger here: no schedule and no flush.
+            async with ArtifactProcessingSupervisor(
+                database=profile.database,
+                bindings=(ArtifactProcessingBinding("memory-binding", "memory", launcher, source_count_threshold=3),),
+                lease_mode="single-process",
+            ) as supervisor:
+                await _wait(lambda: bool(launcher.assignments))
+                assert {work.scope_id for work in launcher.assignments} == {"ready"}
+                await _wait(lambda: supervisor.family_status["memory"]["completed"] >= 1)
+                assert (await _intent(profile.database, "memory-binding", "ready")).handled_generation >= 1
+                await asyncio.sleep(0.1)
+                # Two pending Sources are below the threshold, so nothing starts.
+                assert launcher.assignments and {work.scope_id for work in launcher.assignments} == {"ready"}
+                await _write_journal_head(profile.database, "quiet", 3, insert=False)
+                await _wait(
+                    lambda: {work.scope_id for work in launcher.assignments} == {"ready", "quiet"},
+                    timeout_seconds=5,
+                )
+
+    asyncio.run(scenario())
+
+
+def test_source_count_threshold_does_not_accept_again_over_pending_work(tmp_path):
+    async def scenario():
+        async with _profile(tmp_path, "count-in-flight") as profile:
+            await _write_journal_head(profile.database, "scope", 5, insert=True)
+            blocked = asyncio.Event()
+            launcher = _Launcher(profile.database, gates={"scope": blocked})
+            async with ArtifactProcessingSupervisor(
+                database=profile.database,
+                bindings=(ArtifactProcessingBinding("memory-binding", "memory", launcher, source_count_threshold=2),),
+                lease_mode="single-process",
+            ) as supervisor:
+                await _wait(lambda: len(launcher.assignments) == 1)
+                # Reaching the threshold accepts one call; the accepted call keeps
+                # owning the pending Sources until it completes.
+                await asyncio.sleep(1.2)
+                assert len(launcher.assignments) == 1
+                blocked.set()
+                await _wait(lambda: supervisor.family_status["memory"]["completed"] == 1)
 
     asyncio.run(scenario())
