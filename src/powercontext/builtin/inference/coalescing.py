@@ -91,11 +91,11 @@ class CoalescingEmbeddingModel:
         cache_size: int = 1024,
     ) -> None:
         if max_batch_size < 1:
-            raise ValueError("max_batch_size must be at least 1")
+            raise ValueError("max_batch_size must be at least 1")  # noqa: TRY003
         if coalesce_ms < 0:
-            raise ValueError("coalesce_ms must not be negative")
+            raise ValueError("coalesce_ms must not be negative")  # noqa: TRY003
         if cache_size < 0:
-            raise ValueError("cache_size must not be negative")
+            raise ValueError("cache_size must not be negative")  # noqa: TRY003
         self._model = model
         self.profile: EmbeddingProfile = model.profile
         self._max_batch_size = max_batch_size
@@ -103,7 +103,7 @@ class CoalescingEmbeddingModel:
         self._cache_size = cache_size
         self._document_namespace = _Namespace(call=model.embed)
         if isinstance(model, QueryEmbeddingModel):
-            self._query_namespace = _Namespace(call=getattr(model, "embed_query"))
+            self._query_namespace = _Namespace(call=model.embed_query)
         else:
             self._query_namespace = self._document_namespace
 

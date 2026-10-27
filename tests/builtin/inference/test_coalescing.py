@@ -53,7 +53,7 @@ class _FakeEmbeddingModel:
         if self.gate is not None:
             await self.gate.wait()
         if self.fail:
-            raise RuntimeError("provider is unavailable")
+            raise RuntimeError("provider is unavailable")  # noqa: TRY003
         vectors = [_vector(text) for text in texts]
         if self.vector_count_delta:
             vectors = vectors[: len(vectors) - self.vector_count_delta]
@@ -133,10 +133,10 @@ def test_recently_used_text_survives_eviction() -> None:
         await wrapper.embed(("alpha",))
         await wrapper.embed(("gamma",))
         await wrapper.embed(("alpha",))
-        assert [call for call in base.calls].count(("alpha",)) == 1
-        assert [call for call in base.calls].count(("beta",)) == 1
+        assert base.calls.count(("alpha",)) == 1
+        assert base.calls.count(("beta",)) == 1
         await wrapper.embed(("beta",))
-        assert [call for call in base.calls].count(("beta",)) == 2
+        assert base.calls.count(("beta",)) == 2
 
     asyncio.run(scenario())
 
@@ -185,7 +185,7 @@ def test_one_failing_batch_does_not_block_an_independent_batch() -> None:
         async def embed(self, texts: tuple[str, ...], /) -> EmbeddingResult:
             self.calls.append(tuple(texts))
             if "bad" in texts:
-                raise RuntimeError("provider is unavailable")
+                raise RuntimeError("provider is unavailable")  # noqa: TRY003
             return EmbeddingResult(
                 vectors=tuple(_vector(text) for text in texts),
                 usage=InferenceUsage(requests=1, input_tokens=len(texts), output_tokens=0),
