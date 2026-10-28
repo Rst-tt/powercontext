@@ -59,14 +59,36 @@ _BM25_B: Final = 0.4
 #: characters name the same idea, and a page that spells it differently is still evidence.
 _FOLD_LENGTH: Final = 7
 
+#: Only a question that asks for a reported number is answered by a statement page. A
+#: question that asks who, whether, or where is answered by prose, so the statement page
+#: keeps this share of its prior - it still summarizes the filing - and its numeric tables
+#: earn nothing.
+_NARRATIVE_STATEMENT_SHARE: Final = 1.0 / 3.0
+_METRIC_QUESTION: Final = re.compile(
+    r"\b(?:margin|ratio|tax rate|ebitda|capex|revenue|earnings|cost|costs|expense|expenses"
+    r"|income|liabilit\w*|debt|cash|dividend\w*|largest|total|amount|percentage|percent"
+    r"|how much|how many|increase\w*|decrease\w*|change\w*|grew|grow\w*|average|balance"
+    r"|outstanding|spent|spend\w*|paid|payments?|fees?|number of)\b"
+)
 
-#: A statement page announces itself in its header, before any narrative section.
+#: Evidence in a filing is a block, not a line: the paragraph that carries the answer
+#: usually starts on the page before or continues on the page after the one the terms
+#: picked out. A page takes most of the advantage of an adjacent page, so a whole block
+#: reaches the answer list even when only one of its pages matches the wording.
+_EVIDENCE_WINDOW_WEIGHT: Final = 0.65
+
+
+#: A financial statement or a summary of one announces itself in the page header, before
+#: any narrative section. A summary table answers a metrics question as directly as the
+#: statement it summarizes, and it carries the heading that names the metric.
 _STATEMENT_HEAD_CHARS: Final = 220
 _STATEMENT_MARKERS: Final = (
     "balancesheet",
     "balancesheets",
     "consolidatedbalancesheet",
     "consolidatedbalancesheets",
+    "summaryoffinancialperformance",
+    "summaryofbusinesssegmentdata",
     "statementofincome",
     "statementsofincome",
     "consolidatedstatementofincome",
@@ -653,7 +675,7 @@ async def search_pdf_pages(
         return ()
     terms = _query_terms(text)
     scores = _document_scores(text, corpus.pages)
-    return await _citations(memory, _rank(corpus, terms, scores), limit)
+    return await _citations(memory, _rank(corpus, terms, scores, _asks_for_metric(text)), limit)
 
 
 async def _load_corpus(memory: Any) -> _Corpus:
@@ -683,14 +705,27 @@ async def _load_corpus(memory: Any) -> _Corpus:
     return _Corpus(pages)
 
 
-def _rank(corpus: _Corpus, terms: Sequence[str], documents: dict[str, float]) -> list[_Page]:
+def _asks_for_metric(question: str) -> bool:
+    """Whether the question asks for a reported number rather than for prose."""
+
+    return bool(_METRIC_QUESTION.search(question.lower()))
+
+
+def _rank(
+    corpus: _Corpus,
+    terms: Sequence[str],
+    documents: dict[str, float],
+    metrics: bool,
+) -> list[_Page]:
     """Order every page of the scope by how likely it carries the answer."""
 
     best = max(documents.values(), default=0.0)
     focus = _focus_document(documents)
     folded = corpus.fold(terms)
     distinct = _distinct(folded)
-    scored: list[tuple[float, float, str, int, _Page]] = []
+    statement_weight = _STATEMENT_WEIGHT if metrics else _STATEMENT_WEIGHT * _NARRATIVE_STATEMENT_SHARE
+    digit_weight = _DIGIT_WEIGHT if metrics else 0.0
+    scored: list[tuple[float, _Page]] = []
     for index, page in enumerate(corpus.pages):
         #: A question about one filing is answered by that filing: every page of another
         #: document in the scope is a distractor, however well it matches a common term.
@@ -703,14 +738,30 @@ def _rank(corpus: _Corpus, terms: Sequence[str], documents: dict[str, float]) ->
         score = (
             corpus.bm25(index, folded)
             + _HEADING_WEIGHT * corpus.heading_overlap(index, folded)
-            + _DIGIT_WEIGHT * corpus.digit_share(index)
-            + (_STATEMENT_WEIGHT if statement else 0.0)
+            + digit_weight * corpus.digit_share(index)
+            + (statement_weight if statement else 0.0)
         )
         if best:
             score += _DOCUMENT_WEIGHT * documents.get(page.document_id, 0.0) / best
-        scored.append((score, page.document_id, page.page_number, index, page))
-    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
-    return [item[4] for item in scored]
+        scored.append((score, page))
+    ranked = _spread_window(scored)
+    ranked.sort(key=lambda item: (-item[0], item[1].document_id, item[1].page_number))
+    return [page for _score, page in ranked]
+
+
+def _spread_window(scored: Sequence[tuple[float, _Page]]) -> list[tuple[float, _Page]]:
+    """Let every page carry most of the advantage of the page beside it."""
+
+    raw = {(page.document_id, page.page_number): score for score, page in scored}
+    spread: list[tuple[float, _Page]] = []
+    for score, page in scored:
+        neighbor = score
+        for step in (-1, 1):
+            other = raw.get((page.document_id, page.page_number + step))
+            if other is not None:
+                neighbor = max(neighbor, other)
+        spread.append((score + _EVIDENCE_WINDOW_WEIGHT * (neighbor - score), page))
+    return spread
 
 
 #: A year alone names every filing of the scope, so only a clear margin names a document.

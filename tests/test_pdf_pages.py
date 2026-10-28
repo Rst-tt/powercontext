@@ -122,8 +122,8 @@ class _PagePipeline:
         )
 
 
-async def _drain(memory) -> None:
-    for _ in range(len(_PAGE_TEXTS) + 2):
+async def _drain(memory, pages: int = len(_PAGE_TEXTS)) -> None:
+    for _ in range(pages + 2):
         if not (await memory.flush()).processed:
             return
     raise AssertionError("flush did not drain the captured pages")  # noqa: TRY003
@@ -255,3 +255,59 @@ def test_search_returns_distinct_pages_that_read_back_from_memory(tmp_path: Path
     empty_question, no_limit = asyncio.run(scenario())
     assert empty_question == ()
     assert no_limit == ()
+
+
+#: The statement page reports cargo carried for airlines and firm orders, but only the prose
+#: page says who places the orders and who leases the aircraft. A question that asks for that
+#: discussion must not be answered by the table pricing the same nouns.
+_GATE_PAGES = [
+    *(
+        f"Item 1A. Risk Factors\nGeneral economic conditions may affect our results in {2000 + index}."
+        for index in range(12)
+    ),
+    "Consolidated Statements of Income\nCargo carried for airlines and firm orders is 10,000.",
+    "Our customers place orders for aircraft delivery, airlines lease aircraft from us and suppliers deliver parts.",
+]
+_GATE_QUESTION = "Which customers place orders for aircraft delivery and which airlines lease aircraft from suppliers?"
+
+
+def test_a_narrative_question_is_answered_by_the_page_that_discusses_it(tmp_path: Path) -> None:
+    async def scenario():
+        scope_id = await _capture(tmp_path, _GATE_PAGES, document_id="GATE")
+        config = BuiltinConfig(database=SQLiteConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'sources.db'}"))
+        async with open_builtin_runtime(config, candidate_pipeline=_PagePipeline()) as runtime:
+            memory = runtime.memory.for_scope(scope_id)
+            await _drain(memory, len(_GATE_PAGES))
+            citations = await search_pdf_pages(memory, _GATE_QUESTION, limit=1)
+            entry = (await memory.get(GetMemoryEntryRequest(citation=citations[0]))).entry
+            return _page_number(entry.sources[0].source_id)
+
+    assert asyncio.run(scenario()) == len(_GATE_PAGES)
+
+
+#: The paragraph that answers a question runs over a page break, so the neighbouring page
+#: belongs to the same evidence block even when only one of the two matches the wording.
+_WINDOW_PAGES = [
+    "Table of Contents\nItem 1. Business",
+    "Item 1. Business\nOur primary customers are commercial airlines and leasing companies.",
+    "Our customers negotiate delivery schedules several years before delivery.",
+    "Item 1A. Risk Factors\nThe market for commercial airlines is cyclical and seasonal.",
+    "Item 8. Financial Statements\nLong-term debt maturing after 2027.",
+]
+
+
+def test_a_page_beside_the_matching_page_is_offered_as_the_same_block(tmp_path: Path) -> None:
+    async def scenario():
+        scope_id = await _capture(tmp_path, _WINDOW_PAGES, document_id="CUST")
+        config = BuiltinConfig(database=SQLiteConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'sources.db'}"))
+        async with open_builtin_runtime(config, candidate_pipeline=_PagePipeline()) as runtime:
+            memory = runtime.memory.for_scope(scope_id)
+            await _drain(memory, len(_WINDOW_PAGES))
+            citations = await search_pdf_pages(memory, "Who are the primary customers of the company?", limit=2)
+            pages = []
+            for citation in citations:
+                entry = (await memory.get(GetMemoryEntryRequest(citation=citation))).entry
+                pages.append(_page_number(entry.sources[0].source_id))
+            return pages
+
+    assert asyncio.run(scenario()) == [2, 3]
