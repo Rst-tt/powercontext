@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import io
 import math
@@ -53,6 +54,10 @@ _BM25_K1: Final = 1.2
 #: Report pages run long, so length normalization stays gentle: a note that answers the
 #: question in its last paragraph must still outrank a short page that only repeats it.
 _BM25_B: Final = 0.4
+#: A question and a filing rarely spell one idea the same way: "cyclicality" against
+#: "cyclical", "geographies" against "geographic". Terms that share this many leading
+#: characters name the same idea, and a page that spells it differently is still evidence.
+_FOLD_LENGTH: Final = 7
 
 
 #: A statement page announces itself in its header, before any narrative section.
@@ -575,6 +580,7 @@ class _Corpus:
         self.counts = tuple(Counter(tokens) for tokens in self.tokens)
         self.headings = tuple(_heading_terms(page.body) for page in self.pages)
         self.lengths = tuple(len(tokens) for tokens in self.tokens)
+        self.vocabulary = tuple(sorted({term for tokens in self.tokens for term in tokens}))
         self.average_length = (sum(self.lengths) / len(self.lengths)) if self.lengths else 0.0
         frequency: Counter[str] = Counter()
         for tokens in self.tokens:
@@ -592,6 +598,26 @@ class _Corpus:
                 continue
             total += self.idf.get(term, 0.0) * frequency * (_BM25_K1 + 1) / (frequency + normalization)
         return total
+
+    def fold(self, terms: Sequence[str]) -> tuple[str, ...]:
+        """Return the scope spellings one question term can have.
+
+        The scope vocabulary is the only place where the answer's wording is known, so
+        folding is done against it: "cyclicality" folds onto "cyclical" when this
+        filing spells it that way, and stays itself when it does not.
+        """
+
+        folded: list[str] = []
+        for term in terms:
+            if len(term) <= _FOLD_LENGTH:
+                folded.append(term)
+                continue
+            head = term[:_FOLD_LENGTH]
+            start = bisect.bisect_left(self.vocabulary, head)
+            end = bisect.bisect_left(self.vocabulary, f"{head}\U0010ffff")
+            matches = self.vocabulary[start:end]
+            folded.extend(matches or (term,))
+        return tuple(folded)
 
     def heading_overlap(self, index: int, terms: Sequence[str]) -> float:
         heading = self.headings[index]
@@ -661,23 +687,45 @@ def _rank(corpus: _Corpus, terms: Sequence[str], documents: dict[str, float]) ->
     """Order every page of the scope by how likely it carries the answer."""
 
     best = max(documents.values(), default=0.0)
-    distinct = _distinct(terms)
-    scored: list[tuple[float, str, int, int, _Page]] = []
+    focus = _focus_document(documents)
+    folded = corpus.fold(terms)
+    distinct = _distinct(folded)
+    scored: list[tuple[float, float, str, int, _Page]] = []
     for index, page in enumerate(corpus.pages):
+        #: A question about one filing is answered by that filing: every page of another
+        #: document in the scope is a distractor, however well it matches a common term.
+        if focus is not None and page.document_id != focus:
+            continue
         #: A structural prior only refines a page that answers something: a page that
         #: shares no term with the question is not evidence, whatever it presents.
         matched = any(term in corpus.counts[index] for term in distinct)
+        statement = matched and _is_statement_page(page.body)
         score = (
-            corpus.bm25(index, terms)
-            + _HEADING_WEIGHT * corpus.heading_overlap(index, terms)
+            corpus.bm25(index, folded)
+            + _HEADING_WEIGHT * corpus.heading_overlap(index, folded)
             + _DIGIT_WEIGHT * corpus.digit_share(index)
-            + (_STATEMENT_WEIGHT if matched and _is_statement_page(page.body) else 0.0)
+            + (_STATEMENT_WEIGHT if statement else 0.0)
         )
         if best:
             score += _DOCUMENT_WEIGHT * documents.get(page.document_id, 0.0) / best
         scored.append((score, page.document_id, page.page_number, index, page))
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
     return [item[4] for item in scored]
+
+
+#: A year alone names every filing of the scope, so only a clear margin names a document.
+_FOCUS_MARGIN: Final = 1.5
+
+
+def _focus_document(documents: dict[str, float]) -> str | None:
+    """Name the one document a question is about, when it names exactly one."""
+
+    ranked = sorted(documents.items(), key=lambda item: (-item[1], item[0]))
+    if not ranked or ranked[0][1] <= 0:
+        return None
+    if len(ranked) > 1 and ranked[0][1] < _FOCUS_MARGIN * ranked[1][1]:
+        return None
+    return ranked[0][0]
 
 
 def _distinct(terms: Sequence[str]) -> tuple[str, ...]:
