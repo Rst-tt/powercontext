@@ -8,12 +8,12 @@
 
 | 项 | 值 |
 | --- | --- |
-| Qoder 账号 UID | `<!-- 填写：Qoder 个人账号 UID -->` |
+| Qoder 账号 UID | `01a185b5-724a-70a3-80d7-37e52ddb31a1` |
 | Qoder Sites 站点地址 | https://recall-coach-uatkigmv89n.qoder.website （已设为「任何人都可访问」，未登录可打开） |
 | 代码仓库地址 | https://github.com/Rst-tt/powercontext/tree/2026-competition-ecosystem |
 | 本次开发使用的分支 | `2026-competition-ecosystem`（赛题要求的基线分支） |
 | 主要开发目录 | `qoder/` |
-| 开发起止时间 | `<!-- 填写 -->` |
+| 开发起止时间 | 2026-10-27 至 2026-10-29 |
 
 ## 1. 需求拆解（Qoder 对话 1）
 
