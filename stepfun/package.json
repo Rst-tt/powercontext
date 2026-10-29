@@ -1,0 +1,27 @@
+{
+  "name": "stepfun-local-kb",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-side embedding + seekdb hybrid retrieval mini knowledge base",
+  "scripts": {
+    "setup": "node scripts/setup-assets.mjs",
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:web": "vite",
+    "dev:server": "node server/index.mjs",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "npm run build && node server/index.mjs --serve-dist",
+    "eval": "node scripts/eval-quality.mjs",
+    "bench": "echo \"open http://localhost:5173/bench.html?backend=wasm\""
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "seekdb": "^1.4.0"
+  },
+  "devDependencies": {
+    "@huggingface/transformers": "^4.3.2",
+    "concurrently": "^9.1.2",
+    "vite": "^6.0.7"
+  }
+}

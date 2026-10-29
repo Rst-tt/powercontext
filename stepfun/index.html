@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>本地知识库 · 端侧向量化 + seekdb 混合检索</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">◒</span>
+        <div>
+          <h1>本地知识库</h1>
+          <p class="sub">端侧向量化 · seekdb 混合检索</p>
+        </div>
+      </div>
+      <div class="chips" id="chips">
+        <span class="chip" id="chip-backend" title="推理后端">检测中…</span>
+        <span class="chip" id="chip-model" title="embedding 模型">模型未加载</span>
+        <select class="chip" id="precision-select" title="WASM 后端的量化精度">
+          <option value="int8">INT8</option>
+          <option value="fp32">FP32</option>
+        </select>
+        <span class="chip" id="chip-load" title="模型加载耗时">—</span>
+        <button class="chip chip-action" id="btn-load-model">加载模型</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel" id="panel-import">
+        <div class="panel-head">
+          <h2>1 · 导入语料</h2>
+          <span class="muted" id="doc-count">0 个片段</span>
+        </div>
+
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="file-input" accept=".txt,.md,.csv,.json" multiple hidden />
+          <strong>拖入文本文件</strong>
+          <span class="muted">或点击选择 · 支持 .txt / .md / .csv</span>
+        </label>
+
+        <textarea id="paste-area" rows="4" placeholder="也可以直接粘贴文本，每段用空行分隔…"></textarea>
+
+        <div class="row">
+          <label class="field">
+            <span>分块长度</span>
+            <input type="number" id="chunk-size" value="360" min="120" max="1200" step="20" />
+          </label>
+          <label class="field">
+            <span>批大小</span>
+            <input type="number" id="batch-size" value="8" min="1" max="32" step="1" />
+          </label>
+          <button class="primary" id="btn-import">向量化并写入</button>
+        </div>
+
+        <div class="progress" id="import-progress" hidden>
+          <div class="bar"><i></i></div>
+          <span id="import-status">准备中…</span>
+        </div>
+
+        <div class="stats" id="import-stats" hidden>
+          <div><span>分块</span><b id="st-chunks">0</b></div>
+          <div><span>向量化</span><b id="st-embed">—</b></div>
+          <div><span>写入 seekdb</span><b id="st-write">—</b></div>
+          <div><span>吞吐</span><b id="st-throughput">—</b></div>
+        </div>
+
+        <div class="panel-foot">
+          <button class="ghost" id="btn-reset">清空知识库</button>
+          <span class="muted" id="collection-info">—</span>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-search">
+        <div class="panel-head">
+          <h2>2 · 检索</h2>
+          <span class="muted" id="search-status">就绪</span>
+        </div>
+
+        <div class="tabs" id="mode-tabs" role="tablist">
+          <button class="tab active" data-mode="hybrid" role="tab">混合 (RRF)</button>
+          <button class="tab" data-mode="vector" role="tab">语义向量</button>
+          <button class="tab" data-mode="keyword" role="tab">关键词全文</button>
+        </div>
+
+        <div class="row">
+          <input type="text" id="query-input" placeholder="输入问题，例如：how does seekdb build a vector index?" />
+          <label class="field compact">
+            <span>Top-K</span>
+            <input type="number" id="topk" value="10" min="1" max="50" />
+          </label>
+          <button class="primary" id="btn-search">检索</button>
+        </div>
+
+        <div class="stats slim" id="search-stats" hidden>
+          <div><span>查询向量化</span><b id="st-qembed">—</b></div>
+          <div><span>seekdb 检索</span><b id="st-query">—</b></div>
+          <div><span>端到端</span><b id="st-e2e">—</b></div>
+        </div>
+
+        <ol class="results" id="results">
+          <li class="empty">导入语料后，这里会显示检索结果和命中的原文</li>
+        </ol>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>向量与原文存储、混合检索均在 seekdb 内完成</span>
+      <span id="footer-table" class="muted">—</span>
+    </footer>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

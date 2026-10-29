@@ -1,0 +1,18 @@
+{
+  "model": "Xenova/all-MiniLM-L6-v2",
+  "documents": 30,
+  "queries": 12,
+  "fp32Bytes": 90387606,
+  "int8Bytes": 22972370,
+  "compressionRatio": 3.93,
+  "fp32": {
+    "loadMs": 427,
+    "recallAt5": 0.5333,
+    "mrr": 0.9583
+  },
+  "int8": {
+    "loadMs": 318,
+    "recallAt5": 0.5333,
+    "mrr": 0.9583
+  }
+}

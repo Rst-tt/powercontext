@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>端侧推理基准 · local knowledge base</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <style>
+      body { padding: 28px; }
+      pre {
+        background: #0f172a;
+        color: #e2e8f0;
+        padding: 16px 18px;
+        border-radius: 12px;
+        overflow: auto;
+        font-size: 12.5px;
+        line-height: 1.6;
+      }
+      h1 { font-size: 18px; margin: 0 0 6px; }
+      .hint { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+      .controls { display: flex; gap: 10px; margin-bottom: 16px; align-items: center; }
+    </style>
+  </head>
+  <body>
+    <h1>端侧推理基准</h1>
+    <p class="hint">
+      同一份语料、同一批查询，分别测量模型加载、文档向量化、查询向量化与 seekdb 检索耗时。
+      用 <code>?backend=wasm</code> 或 <code>?backend=webgpu</code> 固定推理后端。
+    </p>
+    <div class="controls">
+      <button class="primary" id="run">开始测量</button>
+      <span class="muted" id="status">就绪</span>
+    </div>
+    <pre id="out">等待开始…</pre>
+    <script type="module" src="/src/bench.js"></script>
+  </body>
+</html>
