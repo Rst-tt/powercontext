@@ -16,12 +16,16 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import io
+import math
 import re
-from collections.abc import Iterable, Sequence
+from collections import Counter
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Final
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -37,13 +41,381 @@ PDF_PAGE_SOURCE_VERSION: Final = "1"
 #: The Memory entry body bound. One projected page must fit in one Memory entry.
 MAX_PDF_PAGE_TEXT_BYTES: Final = 8_192
 
-#: Retrieval tuning. One question is answered from a small number of evidence pages.
-_SEARCH_POOL_MULTIPLIER: Final = 4
-_SEARCH_POOL_FLOOR: Final = 60
-_RRF_CONSTANT: Final = 60
+#: Retrieval tuning. A question is answered from a handful of evidence pages, so the
+#: ranking weighs structural signals - a statement page, a section heading, a numeric
+#: table - next to plain term overlap, and prefers pages of the document it names. The
+#: statement prior is the strongest of them: when a question asks for a reported line
+#: item the statement page is the evidence, and the pages that only discuss it are not.
+_STATEMENT_WEIGHT: Final = 16.0
+_HEADING_WEIGHT: Final = 1.0
+_DIGIT_WEIGHT: Final = 3.0
+_DOCUMENT_WEIGHT: Final = 20.0
+_BM25_K1: Final = 1.2
+#: Report pages run long, so length normalization stays gentle: a note that answers the
+#: question in its last paragraph must still outrank a short page that only repeats it.
+_BM25_B: Final = 0.4
+#: A question and a filing rarely spell one idea the same way: "cyclicality" against
+#: "cyclical", "geographies" against "geographic". Terms that share this many leading
+#: characters name the same idea, and a page that spells it differently is still evidence.
+_FOLD_LENGTH: Final = 7
 
-_TOKEN_PATTERN: Final = re.compile(r"[a-z]+|\d+")
-_SENTENCE_PATTERN: Final = re.compile(r"(?<=[.!?])\s+|\n+")
+#: Only a question that asks for a reported number is answered by a statement page. A
+#: question that asks who, whether, or where is answered by prose, so the statement page
+#: keeps this share of its prior - it still summarizes the filing - and its numeric tables
+#: earn nothing.
+_NARRATIVE_STATEMENT_SHARE: Final = 1.0 / 3.0
+_METRIC_QUESTION: Final = re.compile(
+    r"\b(?:margin|ratio|tax rate|ebitda|capex|revenue|earnings|cost|costs|expense|expenses"
+    r"|income|liabilit\w*|debt|cash|dividend\w*|largest|total|amount|percentage|percent"
+    r"|how much|how many|increase\w*|decrease\w*|change\w*|grew|grow\w*|average|balance"
+    r"|outstanding|spent|spend\w*|paid|payments?|fees?|number of)\b"
+)
+
+#: Evidence in a filing is a block, not a line: the paragraph that carries the answer
+#: usually starts on the page before or continues on the page after the one the terms
+#: picked out. A page takes most of the advantage of an adjacent page, so a whole block
+#: reaches the answer list even when only one of its pages matches the wording.
+_EVIDENCE_WINDOW_WEIGHT: Final = 0.65
+
+
+#: A financial statement or a summary of one announces itself in the page header, before
+#: any narrative section. A summary table answers a metrics question as directly as the
+#: statement it summarizes, and it carries the heading that names the metric.
+_STATEMENT_HEAD_CHARS: Final = 220
+_STATEMENT_MARKERS: Final = (
+    "balancesheet",
+    "balancesheets",
+    "consolidatedbalancesheet",
+    "consolidatedbalancesheets",
+    "summaryoffinancialperformance",
+    "summaryofbusinesssegmentdata",
+    "statementofincome",
+    "statementsofincome",
+    "consolidatedstatementofincome",
+    "consolidatedstatementsofincome",
+    "statementofoperations",
+    "statementsofoperations",
+    "consolidatedstatementsofoperations",
+    "statementofcashflows",
+    "statementsofcashflows",
+    "consolidatedstatementsofcashflows",
+    "statementoffinancialposition",
+    "statementsoffinancialposition",
+    "consolidatedstatementsoffinancialposition",
+    "statementofearnings",
+    "statementsofearnings",
+)
+
+_TERM_PATTERN: Final = re.compile(r"[a-z]+|\d+")
+_SENTENCE_PATTERN: Final = re.compile(r"(?<=[.!?])\s+")
+_WHITESPACE_PATTERN: Final = re.compile(r"\s+")
+_STRUCTURAL_HEADING: Final = re.compile(r"^(?:item\s+\d|part\s+[ivx]+|note\s+\d)", re.IGNORECASE)
+
+#: A question about a report also carries instructions about how to answer it. Those
+#: sentences describe the analyst, not the page, so they must not weigh on ranking.
+_INSTRUCTION_PATTERN: Final = re.compile(
+    r"\bround(?:ed)?\b[^.]*\bdecimal\b"
+    r"|\bdecimal places\b"
+    r"|\bbase[ds]? (?:your|on your) judgment\b"
+    r"|\binformation provided\b"
+    r"|\bpublicly available\b"
+    r"|\bplease state\b"
+    r"|\bnot a relevant metric\b"
+    r"|\bassume that\b"
+    r"|\bperspective of an? \w+\b"
+    r"|\bfiscal year end\b",
+    re.IGNORECASE,
+)
+
+_FUNCTION_WORDS: Final = frozenset([
+    "a",
+    "an",
+    "the",
+    "of",
+    "to",
+    "in",
+    "on",
+    "at",
+    "by",
+    "for",
+    "with",
+    "from",
+    "and",
+    "or",
+    "but",
+    "if",
+    "then",
+    "than",
+    "that",
+    "this",
+    "these",
+    "those",
+    "it",
+    "its",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "do",
+    "does",
+    "did",
+    "has",
+    "have",
+    "had",
+    "can",
+    "could",
+    "would",
+    "should",
+    "will",
+    "shall",
+    "may",
+    "might",
+    "must",
+    "not",
+    "no",
+    "as",
+    "so",
+    "such",
+    "what",
+    "which",
+    "who",
+    "whom",
+    "whose",
+    "when",
+    "where",
+    "why",
+    "how",
+    "we",
+    "our",
+    "you",
+    "your",
+    "they",
+    "their",
+    "he",
+    "she",
+    "him",
+    "her",
+    "me",
+    "my",
+    "us",
+    "them",
+    "there",
+    "here",
+    "also",
+    "any",
+    "all",
+    "each",
+    "every",
+    "both",
+    "either",
+    "neither",
+    "more",
+    "most",
+    "other",
+    "some",
+    "many",
+    "much",
+    "few",
+    "less",
+    "least",
+    "very",
+    "just",
+    "only",
+    "about",
+    "over",
+    "under",
+    "into",
+    "onto",
+    "out",
+    "up",
+    "down",
+    "off",
+    "per",
+    "via",
+    "vs",
+    "versus",
+    "between",
+    "during",
+    "after",
+    "before",
+    "since",
+    "while",
+    "through",
+    "across",
+    "among",
+    "within",
+    "without",
+])
+_META_WORDS: Final = frozenset([
+    "answer",
+    "respond",
+    "response",
+    "assume",
+    "assumed",
+    "assumption",
+    "analyst",
+    "banker",
+    "perspective",
+    "round",
+    "rounded",
+    "decimal",
+    "place",
+    "places",
+    "usd",
+    "million",
+    "millions",
+    "billion",
+    "billions",
+    "primarily",
+    "base",
+    "based",
+    "judgment",
+    "publicly",
+    "available",
+    "information",
+    "provided",
+    "please",
+    "state",
+    "two",
+    "relevant",
+    "metric",
+    "fiscal",
+    "year",
+    "end",
+    "fye",
+    "fy",
+    "fq",
+    "quarter",
+])
+_STOP_TERMS: Final = _FUNCTION_WORDS | _META_WORDS
+
+_WORD_PATTERN: Final = re.compile(r"[0-9A-Za-z][A-Za-z0-9&.'\u2019-]*")
+_POSSESSIVE_PATTERN: Final = re.compile(r"['\u2019]s$")
+_WORD_CHARACTERS_PATTERN: Final = re.compile(r"[^a-z0-9]+")
+_YEAR_PATTERN: Final = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+_QUARTER_PATTERN: Final = re.compile(r"\bq([1-4])\b", re.IGNORECASE)
+
+#: Capitalised words that shape a question instead of naming an issuer.
+_NON_NAME_WORDS: Final = frozenset([
+    "which",
+    "what",
+    "how",
+    "does",
+    "do",
+    "is",
+    "are",
+    "was",
+    "were",
+    "will",
+    "can",
+    "could",
+    "should",
+    "would",
+    "the",
+    "in",
+    "for",
+    "on",
+    "by",
+    "at",
+    "to",
+    "of",
+    "and",
+    "or",
+    "if",
+    "when",
+    "where",
+    "who",
+    "why",
+    "here",
+    "this",
+    "that",
+    "these",
+    "those",
+    "as",
+    "while",
+    "during",
+    "between",
+    "after",
+    "before",
+    "since",
+    "from",
+    "with",
+    "per",
+    "plus",
+    "versus",
+    "vs",
+    "fy",
+    "fq",
+    "gaap",
+    "us",
+    "usa",
+    "usd",
+    "eps",
+    "roa",
+    "roe",
+    "ebitda",
+    "cagr",
+    "cpi",
+    "gbp",
+    "eur",
+    "base",
+    "based",
+    "roughly",
+    "address",
+    "real",
+    "sales",
+    "total",
+    "average",
+    "net",
+    "gross",
+    "operating",
+    "adjusted",
+    "non",
+    "pro",
+    "forma",
+    "company",
+    "corporation",
+    "inc",
+    "its",
+    "it",
+    "their",
+    "they",
+    "we",
+    "our",
+    "you",
+    "your",
+    "please",
+    "state",
+    "assume",
+    "round",
+    "decimal",
+    "places",
+    "answer",
+    "judgment",
+    "information",
+    "publicly",
+    "available",
+    "fiscal",
+    "year",
+    "financial",
+    "statement",
+    "statements",
+    "share",
+    "shares",
+    "stock",
+    "price",
+    "value",
+    "market",
+    "revenue",
+    "income",
+    "cash",
+    "flow",
+    "flows",
+    "margin",
+])
 
 __all__ = [
     "MAX_PDF_PAGE_TEXT_BYTES",
@@ -55,6 +427,7 @@ __all__ = [
     "PDFPageSource",
     "PDFPageTextEvidenceProjection",
     "parse_pdf_document",
+    "pdf_page_identity",
     "pdf_page_source_id",
     "search_pdf_pages",
 ]
@@ -118,6 +491,21 @@ def pdf_page_source_id(document_id: str, document_sha256: str, page_number: int)
         return identity
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return f"{PDF_PAGE_SOURCE_NAME}=sha256:{digest}"
+
+
+def pdf_page_identity(source_id: str) -> tuple[str, int] | None:
+    """Read the document and physical page back from one captured page identity."""
+
+    prefix = f"{PDF_PAGE_SOURCE_NAME}:"
+    if not source_id.startswith(prefix):
+        return None
+    parts = source_id[len(prefix) :].split(":")
+    if len(parts) != 3:
+        return None
+    document_id, digest, number = parts
+    if not _is_sha256(digest) or not number.isdigit() or int(number) < 1:
+        return None
+    return unquote(document_id), int(number)
 
 
 def parse_pdf_document(value: PDFDocumentInput) -> tuple[PDFPageInput, ...]:
@@ -195,6 +583,75 @@ PDF_PAGE_SOURCE_DEFINITION: SourceDefinition[PDFPageInput, PDFPageSource, PDFPag
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _Page:
+    """One distinct captured page together with its exact Memory citation."""
+
+    citation: MemoryCitation
+    document_id: str
+    page_number: int
+    body: str
+
+
+class _Corpus:
+    """Token statistics over every captured page reachable from one scoped Memory."""
+
+    def __init__(self, pages: Sequence[_Page]) -> None:
+        self.pages: tuple[_Page, ...] = tuple(pages)
+        self.tokens = tuple(tuple(_TERM_PATTERN.findall(page.body.lower())) for page in self.pages)
+        self.counts = tuple(Counter(tokens) for tokens in self.tokens)
+        self.headings = tuple(_heading_terms(page.body) for page in self.pages)
+        self.lengths = tuple(len(tokens) for tokens in self.tokens)
+        self.vocabulary = tuple(sorted({term for tokens in self.tokens for term in tokens}))
+        self.average_length = (sum(self.lengths) / len(self.lengths)) if self.lengths else 0.0
+        frequency: Counter[str] = Counter()
+        for tokens in self.tokens:
+            frequency.update(set(tokens))
+        size = len(self.pages)
+        self.idf = {term: math.log(1 + (size - count + 0.5) / (count + 0.5)) for term, count in frequency.items()}
+
+    def bm25(self, index: int, terms: Sequence[str]) -> float:
+        counts = self.counts[index]
+        normalization = _BM25_K1 * (1 - _BM25_B + _BM25_B * self.lengths[index] / (self.average_length or 1.0))
+        total = 0.0
+        for term in terms:
+            frequency = counts.get(term, 0)
+            if not frequency:
+                continue
+            total += self.idf.get(term, 0.0) * frequency * (_BM25_K1 + 1) / (frequency + normalization)
+        return total
+
+    def fold(self, terms: Sequence[str]) -> tuple[str, ...]:
+        """Return the scope spellings one question term can have.
+
+        The scope vocabulary is the only place where the answer's wording is known, so
+        folding is done against it: "cyclicality" folds onto "cyclical" when this
+        filing spells it that way, and stays itself when it does not.
+        """
+
+        folded: list[str] = []
+        for term in terms:
+            if len(term) <= _FOLD_LENGTH:
+                folded.append(term)
+                continue
+            head = term[:_FOLD_LENGTH]
+            start = bisect.bisect_left(self.vocabulary, head)
+            end = bisect.bisect_left(self.vocabulary, f"{head}\U0010ffff")
+            matches = self.vocabulary[start:end]
+            folded.extend(matches or (term,))
+        return tuple(folded)
+
+    def heading_overlap(self, index: int, terms: Sequence[str]) -> float:
+        heading = self.headings[index]
+        return sum(self.idf.get(term, 0.0) for term in _distinct(terms) if term in heading)
+
+    def digit_share(self, index: int) -> float:
+        tokens = self.tokens[index]
+        if not tokens:
+            return 0.0
+        return sum(1 for token in tokens if token.isdigit()) / len(tokens)
+
+
 async def search_pdf_pages(
     memory: Any,
     question: str,
@@ -202,10 +659,10 @@ async def search_pdf_pages(
 ) -> tuple[MemoryCitation, ...]:
     """Return at most ``limit`` distinct page citations for one natural-language question.
 
-    The scoped Memory is the only source of candidates: every returned citation is an
-    exact Memory entry that a caller can read back through ``memory.get``. Several
-    offline query views of the same question are searched and fused, because one
-    question rarely matches a single page with every one of its terms.
+    The scoped Memory is the only source of evidence: the pages are read from it, and
+    every citation that leaves this function has been read back through ``memory.get``.
+    Ranking is offline work over those exact entries, because one question rarely
+    matches a page with every one of its terms.
     """
 
     if limit < 1:
@@ -213,97 +670,249 @@ async def search_pdf_pages(
     text = question.strip() if isinstance(question, str) else ""
     if not text:
         return ()
+    corpus = await _load_corpus(memory)
+    if not corpus.pages:
+        return ()
+    terms = _query_terms(text)
+    scores = _document_scores(text, corpus.pages)
+    return await _citations(memory, _rank(corpus, terms, scores, _asks_for_metric(text)), limit)
 
-    from powercontext.builtin.runtime import GetMemoryEntryRequest, SearchMemoryRequest
 
-    pool = max(limit * _SEARCH_POOL_MULTIPLIER, _SEARCH_POOL_FLOOR)
-    candidates: dict[tuple[str, str], _Candidate] = {}
-    for query in _query_variants(text):
-        page = await memory.search(SearchMemoryRequest(query=query, mode="fts", limit=pool))
-        for rank, hit in enumerate(page.hits, start=1):
-            identity = (hit.entry_id, hit.entry_version_id)
-            candidate = candidates.get(identity)
-            if candidate is None:
-                candidate = _Candidate(hit=hit, ranks=[])
-                candidates[identity] = candidate
-            candidate.ranks.append(rank)
+async def _load_corpus(memory: Any) -> _Corpus:
+    """Read every captured page of the scope through its public Memory listing."""
 
-    ranked = _rank_candidates(candidates.values(), text)
+    listing = await memory.list()
+    pages: list[_Page] = []
+    seen: set[str] = set()
+    for record in listing.entries:
+        entry = record.entry
+        if len(entry.sources) != 1:
+            continue
+        source_id = entry.sources[0].source_id
+        identity = pdf_page_identity(source_id)
+        if identity is None or source_id in seen:
+            continue
+        seen.add(source_id)
+        document_id, page_number = identity
+        pages.append(
+            _Page(
+                citation=record.citation,
+                document_id=document_id,
+                page_number=page_number,
+                body=_page_body(document_id, entry.text),
+            )
+        )
+    return _Corpus(pages)
+
+
+def _asks_for_metric(question: str) -> bool:
+    """Whether the question asks for a reported number rather than for prose."""
+
+    return bool(_METRIC_QUESTION.search(question.lower()))
+
+
+def _rank(
+    corpus: _Corpus,
+    terms: Sequence[str],
+    documents: dict[str, float],
+    metrics: bool,
+) -> list[_Page]:
+    """Order every page of the scope by how likely it carries the answer."""
+
+    best = max(documents.values(), default=0.0)
+    focus = _focus_document(documents)
+    folded = corpus.fold(terms)
+    distinct = _distinct(folded)
+    statement_weight = _STATEMENT_WEIGHT if metrics else _STATEMENT_WEIGHT * _NARRATIVE_STATEMENT_SHARE
+    digit_weight = _DIGIT_WEIGHT if metrics else 0.0
+    scored: list[tuple[float, _Page]] = []
+    for index, page in enumerate(corpus.pages):
+        #: A question about one filing is answered by that filing: every page of another
+        #: document in the scope is a distractor, however well it matches a common term.
+        if focus is not None and page.document_id != focus:
+            continue
+        #: A structural prior only refines a page that answers something: a page that
+        #: shares no term with the question is not evidence, whatever it presents.
+        matched = any(term in corpus.counts[index] for term in distinct)
+        statement = matched and _is_statement_page(page.body)
+        score = (
+            corpus.bm25(index, folded)
+            + _HEADING_WEIGHT * corpus.heading_overlap(index, folded)
+            + digit_weight * corpus.digit_share(index)
+            + (statement_weight if statement else 0.0)
+        )
+        if best:
+            score += _DOCUMENT_WEIGHT * documents.get(page.document_id, 0.0) / best
+        scored.append((score, page))
+    ranked = _spread_window(scored)
+    ranked.sort(key=lambda item: (-item[0], item[1].document_id, item[1].page_number))
+    return [page for _score, page in ranked]
+
+
+def _spread_window(scored: Sequence[tuple[float, _Page]]) -> list[tuple[float, _Page]]:
+    """Let every page carry most of the advantage of the page beside it."""
+
+    raw = {(page.document_id, page.page_number): score for score, page in scored}
+    spread: list[tuple[float, _Page]] = []
+    for score, page in scored:
+        neighbor = score
+        for step in (-1, 1):
+            other = raw.get((page.document_id, page.page_number + step))
+            if other is not None:
+                neighbor = max(neighbor, other)
+        spread.append((score + _EVIDENCE_WINDOW_WEIGHT * (neighbor - score), page))
+    return spread
+
+
+#: A year alone names every filing of the scope, so only a clear margin names a document.
+_FOCUS_MARGIN: Final = 1.5
+
+
+def _focus_document(documents: dict[str, float]) -> str | None:
+    """Name the one document a question is about, when it names exactly one."""
+
+    ranked = sorted(documents.items(), key=lambda item: (-item[1], item[0]))
+    if not ranked or ranked[0][1] <= 0:
+        return None
+    if len(ranked) > 1 and ranked[0][1] < _FOCUS_MARGIN * ranked[1][1]:
+        return None
+    return ranked[0][0]
+
+
+def _distinct(terms: Sequence[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(terms))
+
+
+async def _citations(memory: Any, ranked: Sequence[_Page], limit: int) -> tuple[MemoryCitation, ...]:
+    """Keep the best ranked pages that the Memory still answers for, one per page."""
+
+    from powercontext.builtin.runtime import GetMemoryEntryRequest
+
+    stale = _stale_citation_errors()
     selected: list[MemoryCitation] = []
-    seen_sources: set[str] = set()
     for candidate in ranked:
         if len(selected) >= limit:
             break
-        citation = MemoryCitation(
-            memory_ref=candidate.hit.memory_ref,
-            entry_id=candidate.hit.entry_id,
-            entry_version_id=candidate.hit.entry_version_id,
-        )
         try:
-            record = await memory.get(GetMemoryEntryRequest(citation=citation))
-        except Exception:  # noqa: BLE001 - a stale candidate is simply not evidence
+            await memory.get(GetMemoryEntryRequest(citation=candidate.citation))
+        except stale:
             continue
-        sources = record.entry.sources
-        if len(sources) != 1:
-            continue
-        source_id = sources[0].source_id
-        if source_id in seen_sources:
-            continue
-        seen_sources.add(source_id)
-        selected.append(citation)
+        selected.append(candidate.citation)
     return tuple(selected)
 
 
-class _Candidate:
-    """One retrieved Memory entry together with its ranks across query views."""
+def _stale_citation_errors() -> tuple[type[BaseException], ...]:
+    from powercontext.builtin.artifacts.memory import InvalidMemoryCitationError, MemoryEntryNotFoundError
 
-    __slots__ = ("hit", "ranks")
-
-    def __init__(self, hit: Any, ranks: list[int]) -> None:
-        self.hit = hit
-        self.ranks = ranks
+    return (InvalidMemoryCitationError, MemoryEntryNotFoundError)
 
 
-def _query_variants(question: str) -> tuple[str, ...]:
-    """Build the offline query views of one question."""
+def _query_terms(question: str) -> tuple[str, ...]:
+    """Return the distinct content terms of one question after its instructions."""
 
+    sentences = [
+        sentence for sentence in _SENTENCE_PATTERN.split(question) if not _INSTRUCTION_PATTERN.search(sentence)
+    ]
+    text = _POSSESSIVE_PATTERN.sub("", " ".join(sentences).lower())
+    #: A single letter of "M&A" or "3M's" matches half of a report and says nothing on its own.
+    terms = [term for term in _TERM_PATTERN.findall(text) if len(term) > 1]
+    return tuple(dict.fromkeys(term for term in terms if term not in _STOP_TERMS))
+
+
+def _document_scores(question: str, pages: Sequence[_Page]) -> dict[str, float]:
+    """Score how strongly the question names each document of the scope."""
+
+    names = _proper_names(question)
+    years = set(_YEAR_PATTERN.findall(question))
+    quarters = set(_QUARTER_PATTERN.findall(question))
+    scores: dict[str, float] = {}
+    for document_id in {page.document_id for page in pages}:
+        identifier = _normalize_name(document_id)
+        score = sum(3.0 + 0.1 * len(name) for name in names if name in identifier)
+        score += sum(1.0 for year in years if year in identifier)
+        score += sum(1.0 for quarter in quarters if f"q{quarter}" in identifier)
+        scores[document_id] = score
+    return scores
+
+
+def _proper_names(question: str) -> tuple[str, ...]:
+    """Return the normalized name phrases of one question, without possessives."""
+
+    names: list[str] = []
+    run: list[str] = []
+    for match in _WORD_PATTERN.finditer(question):
+        word = _POSSESSIVE_PATTERN.sub("", match.group(0))
+        if _is_name_word(word):
+            run.append(word)
+            continue
+        names.extend(_name_variants(run))
+        run = []
+    names.extend(_name_variants(run))
+    return tuple(dict.fromkeys(name for name in names if name))
+
+
+def _name_variants(words: Sequence[str]) -> list[str]:
+    """Return one joined phrase plus its individual words, all normalized.
+
+    A two-character name still identifies a document: "3M" is a company, and dropping
+    names that short leaves every question about it without a document to score.
+    """
+
+    normalized = [_normalize_name(word) for word in words]
+    normalized = [item for item in normalized if len(item) >= 2]
+    if not normalized:
+        return []
     variants: list[str] = []
-    whole = " ".join(question.split())
-    if whole:
-        variants.append(whole)
-    for sentence in _SENTENCE_PATTERN.split(question):
-        cleaned = " ".join(sentence.split())
-        if cleaned and cleaned not in variants:
-            variants.append(cleaned)
-    return tuple(variants)
+    joined = "".join(normalized)
+    if len(joined) >= 2:
+        variants.append(joined)
+    variants.extend(item for item in normalized if len(item) >= 2)
+    return variants
 
 
-def _rank_candidates(candidates: Iterable[_Candidate], question: str) -> list[_Candidate]:
-    """Fuse the query views and prefer pages that cover more of the question."""
+def _is_name_word(word: str) -> bool:
+    """Tell a name-bearing word from the incidental capitals of a question."""
 
-    terms = _distinct_terms(question)
-    scored: list[tuple[float, float, _Candidate]] = []
-    for candidate in candidates:
-        fused = sum(1.0 / (_RRF_CONSTANT + rank) for rank in candidate.ranks)
-        coverage = _coverage(candidate.hit.text, terms)
-        scored.append((fused + 0.5 * coverage, fused, candidate))
-    scored.sort(key=lambda item: (-item[0], -item[1], item[2].hit.entry_id))
-    return [candidate for _score, _fused, candidate in scored]
+    if len(word) < 2 or word.isdigit() or word.lower() in _NON_NAME_WORDS:
+        return False
+    return any(character.isupper() for character in word) or word[:1].isdigit()
 
 
-def _distinct_terms(question: str) -> tuple[str, ...]:
-    """Return the distinct lowercase terms of one question."""
-
-    return tuple(dict.fromkeys(_TOKEN_PATTERN.findall(question.lower())))
+def _normalize_name(text: str) -> str:
+    return _WORD_CHARACTERS_PATTERN.sub("", text.lower())
 
 
-def _coverage(text: str, terms: Sequence[str]) -> float:
-    """Return the share of question terms that one candidate body contains."""
+def _heading_terms(text: str) -> frozenset[str]:
+    """Return the terms of every heading-like line of one page."""
 
-    if not terms:
-        return 0.0
-    tokens = set(_TOKEN_PATTERN.findall(text.lower()))
-    return sum(1 for term in terms if term in tokens) / len(terms)
+    terms: set[str] = set()
+    for line in text.splitlines():
+        candidate = line.strip()
+        if not 3 <= len(candidate) <= 90:
+            continue
+        letters = [character for character in candidate if character.isalpha()]
+        if not letters:
+            continue
+        words = candidate.split()
+        upper_share = sum(1 for character in letters if character.isupper()) / len(letters)
+        title_case = len(words) <= 9 and all(word[:1].isupper() for word in words if word[:1].isalpha())
+        if upper_share >= 0.6 or title_case or _STRUCTURAL_HEADING.match(candidate):
+            terms.update(_TERM_PATTERN.findall(candidate.lower()))
+    return frozenset(terms)
+
+
+def _is_statement_page(text: str) -> bool:
+    """Tell a page that presents a primary financial statement from a narrative page."""
+
+    head = _WHITESPACE_PATTERN.sub("", text[:_STATEMENT_HEAD_CHARS].lower())
+    return any(marker in head for marker in _STATEMENT_MARKERS)
+
+
+def _page_body(document_id: str, text: str) -> str:
+    """Drop the document line of the projected content, keeping the page body."""
+
+    prefix = f"{document_id}\n"
+    return text[len(prefix) :] if text.startswith(prefix) else text
 
 
 def _validate_document_id(document_id: str) -> str:
@@ -327,18 +936,20 @@ def _read_page_texts(content: bytes) -> tuple[str, ...]:
     try:
         from pypdf import PdfReader
     except ImportError as error:  # pragma: no cover - the locked environment ships pypdf
-        raise ImportError("PDF parsing requires the pypdf package") from error
+        raise ImportError("PDF parsing requires the pypdf package") from error  # noqa: TRY003
 
     try:
         reader = PdfReader(io.BytesIO(content))
-        if reader.is_encrypted:
-            if not reader.decrypt(""):
-                raise ValueError("PDF content is encrypted with an unknown password")  # noqa: TRY003
-        return tuple(_normalize_text(page.extract_text() or "") for page in reader.pages)
-    except ValueError:
-        raise
+        encrypted = reader.is_encrypted
     except Exception as error:
-        raise ValueError("PDF content could not be parsed completely") from error
+        raise ValueError("PDF content could not be parsed completely") from error  # noqa: TRY003
+
+    if encrypted and not reader.decrypt(""):
+        raise ValueError("PDF content is encrypted with an unknown password")  # noqa: TRY003
+    try:
+        return tuple(_normalize_text(page.extract_text() or "") for page in reader.pages)
+    except Exception as error:
+        raise ValueError("PDF content could not be parsed completely") from error  # noqa: TRY003
 
 
 def _normalize_text(text: str) -> str:
@@ -355,7 +966,7 @@ def _bounded_text(document_id: str, text: str) -> str:
     if len(encoded) <= budget:
         return text
     truncated = encoded[:budget].decode("utf-8", errors="ignore")
-    while len(f"{document_id}\n{truncated}".encode("utf-8")) > MAX_PDF_PAGE_TEXT_BYTES:
+    while len(f"{document_id}\n{truncated}".encode()) > MAX_PDF_PAGE_TEXT_BYTES:
         truncated = truncated[:-1]
     return truncated
 
