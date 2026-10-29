@@ -281,7 +281,7 @@ qoder/
 
 | 评审要求 | 在哪里 |
 | --- | --- |
-| 项目网站 | Qoder Sites（见 `docs/website.md`） |
+| 项目网站 | https://recall-coach-uatkigmv89n.qoder.website （Qoder Sites，公开访问；文案见 `docs/website.md`） |
 | 代码仓库 | 本仓库 `qoder/` 目录 |
 | 运行说明 | 本文第 5、6、7 节 |
 | 验证样例 | `scripts/smoke.py` + 本文 6.2 手工路径 |

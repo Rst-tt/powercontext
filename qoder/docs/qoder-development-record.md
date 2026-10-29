@@ -9,8 +9,8 @@
 | 项 | 值 |
 | --- | --- |
 | Qoder 账号 UID | `<!-- 填写：Qoder 个人账号 UID -->` |
-| Qoder Sites 站点地址 | `<!-- 填写：发布后的公开 URL，未登录可访问 -->` |
-| 代码仓库地址 | `<!-- 填写：公开仓库或给评审开通访问的仓库地址 -->` |
+| Qoder Sites 站点地址 | https://recall-coach-uatkigmv89n.qoder.website （已设为「任何人都可访问」，未登录可打开） |
+| 代码仓库地址 | https://github.com/Rst-tt/powercontext/tree/2026-competition-ecosystem |
 | 本次开发使用的分支 | `2026-competition-ecosystem`（赛题要求的基线分支） |
 | 主要开发目录 | `qoder/` |
 | 开发起止时间 | `<!-- 填写 -->` |
