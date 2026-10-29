@@ -1,4 +1,4 @@
-# 知新 / Recall Coach
+﻿# 知新 / Recall Coach
 
 > 一个会用「记忆」复习你的个人学习教练：资料检索交给 **seekdb**，学习者画像与复习上下文交给 **PowerContext**。
 
@@ -196,7 +196,7 @@ cd qoder
 pytest -q tests
 ```
 
-覆盖范围：分词/切段、内置 hash 向量、mirror 后端的写入与聚合、向量+全文 RRF 融合去重、出题（填空回溯、选项、无答案回退、公开卡片不泄漏答案）、评分掌握度、薄弱点记忆去重、PowerContext 离线降级、偏好替换与修正。本机 Windows 与 WSL 均为 `29 passed`；受限 Windows 若报 `No usable temporary directory found`，先把 `TEMP`/`TMP` 指向可写目录再运行。
+覆盖范围：分词/切段、内置 hash 向量、mirror 后端的写入与聚合、向量+全文 RRF 融合去重、出题（填空回溯、选项、无答案回退、公开卡片不泄漏答案）、评分掌握度、薄弱点记忆去重、PowerContext 离线降级、偏好替换与修正。本机 Windows 与 WSL 均为 `30 passed`；受限 Windows 若报 `No usable temporary directory found`，先把 `TEMP`/`TMP` 指向可写目录再运行。
 
 ## 7. 配置项
 

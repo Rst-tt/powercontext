@@ -1,4 +1,4 @@
-# 验证样例（可按步骤复现）
+﻿# 验证样例（可按步骤复现）
 
 > 目标：让评审在 10 分钟内确认三件事——项目能跑、seekdb 在检索里真实生效、PowerContext 的记忆真的跨轮复用。
 > 所有命令都在 `qoder/` 目录下执行；主通道以 Linux/WSL 为准，Windows 见第 5 节。
@@ -75,7 +75,7 @@ pip install -r requirements-dev.txt
 pytest -q tests
 ```
 
-本机实测：Windows 与 WSL 各 `29 passed`（分词/切段、hash 向量、mirror 写入与聚合、RRF 去重、出题与评分、薄弱点去重、离线降级、偏好替换/修正）。
+本机实测：Windows 与 WSL 各 `30 passed`（分词/切段、hash 向量、mirror 写入与聚合、RRF 去重、出题与评分、薄弱点去重、离线降级、偏好替换/修正）。
 
 ## 3. 手动核对 seekdb（检索结果如何进入流程）
 

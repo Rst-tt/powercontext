@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
@@ -104,6 +104,7 @@
       .tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
       .tag.seekdb { background: var(--seekdb-soft); color: var(--seekdb); }
       .tag.pc { background: var(--pc-soft); color: var(--pc); }
+      .table-wrap { overflow-x: auto; }
       table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 12px; overflow: hidden; }
       th, td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 15px; }
       th { font-size: 13px; letter-spacing: 0.06em; color: var(--muted); text-transform: uppercase; background: #fbf9f3; }
@@ -162,7 +163,7 @@
           <span class="chip seekdb">seekdb embedded · 向量 + 全文混合检索</span>
           <span class="chip pc">PowerContext embedded · 记忆与上下文</span>
           <span class="chip accent">零 API Key 可完整运行</span>
-          <span class="chip">pytest 29 例离线检查</span>
+          <span class="chip">pytest 30 例离线检查</span>
         </div>
         <div class="cta">
           <a class="btn" href="#run">本地一键运行</a>
@@ -222,6 +223,7 @@
       <section id="tech">
         <h2>技术分工</h2>
         <p class="sub">两者不互相替代：检索结果只有作答后才可能变成记忆，记忆只影响下一轮检索与提示。</p>
+        <div class="table-wrap">
         <table>
           <thead>
             <tr><th>技术</th><th>在项目里做什么</th><th>怎么核对</th></tr>
@@ -239,6 +241,7 @@
             </tr>
           </tbody>
         </table>
+        </div>
       </section>
 
       <section id="demo">
@@ -277,7 +280,7 @@
         <div class="grid three">
           <div class="card metric"><strong>11/11</strong><span>WSL + 嵌入式 seekdb + 嵌入式 PowerContext：`scripts/smoke.py` 全部通过</span></div>
           <div class="card metric"><strong>11/11</strong><span>Windows 镜像后端（SQLite）冷启动复测，同样全部通过</span></div>
-          <div class="card metric"><strong>29 passed</strong><span>离线单元测试（pytest），不依赖 seekdb / 网络 / PowerContext</span></div>
+          <div class="card metric"><strong>30 passed</strong><span>离线单元测试（pytest），不依赖 seekdb / 网络 / PowerContext</span></div>
         </div>
         <div class="evidence" style="margin-top: 18px">
 $ python scripts/smoke.py --base-url http://127.0.0.1:8848

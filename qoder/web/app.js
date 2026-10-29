@@ -44,7 +44,12 @@
   }
 
   async function api(path, options) {
-    var response = await fetch(path, options);
+    var response;
+    try {
+      response = await fetch(path, options);
+    } catch (error) {
+      throw new Error("网络连接失败，请确认后端服务已启动");
+    }
     var body = null;
     try {
       body = await response.json();
@@ -54,7 +59,7 @@
     if (!response.ok) {
       var detail = body && (body.detail || body.message);
       if (Array.isArray(detail)) detail = detail.map(function (item) { return item.msg || JSON.stringify(item); }).join("；");
-      throw new Error(detail || "HTTP " + response.status);
+      throw new Error(detail || "请求失败（HTTP " + response.status + "）");
     }
     return body;
   }

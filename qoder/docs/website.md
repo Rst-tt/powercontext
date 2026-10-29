@@ -40,7 +40,7 @@
 
 两者不互相替代：检索结果只有在作答之后才可能变成记忆，而记忆只影响下一轮检索与提示。
 
-工程质量：核心逻辑带 29 个离线单元测试（pytest），不依赖 seekdb / 网络 / PowerContext 即可回归，Windows 与 Linux 实测均 `29 passed`。
+工程质量：核心逻辑带 30 个离线单元测试（pytest），不依赖 seekdb / 网络 / PowerContext 即可回归，Windows 与 Linux 实测均 `30 passed`。
 
 ## 演示
 

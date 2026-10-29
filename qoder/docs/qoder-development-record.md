@@ -1,11 +1,7 @@
-# Qoder 开发记录（提交材料模板）
+# Qoder 开发记录
 
-> 本文档是提交给评审的「Qoder 开发记录」。评审关注的是「项目主要开发工作确实由 Qoder 参与完成」，
-> 所以每一节都需要**你在 Qoder 中的真实对话截图/录屏**与**账号 UID**，并让每条记录能对应到 `qoder/` 目录里的真实文件与提交。
->
-> 当前状态：**第 5 节（站点发布）已有 3 张真实 Qoder 对话截图**（`docs/screenshots/qoder/`）；
-> 第 1–4 节是核心功能的会话脚本（可直接粘贴到 Qoder 里执行），**执行后请把对应截图补进各节**，
-> 否则开发记录只覆盖“发布站点”，不足以证明核心功能由 Qoder 完成。
+> 本记录只收录 Qoder 中**真实发生**的对话截图。共 7 段：站点发布与修复 3 段（图 1–3），核心功能联调 3 段（图 4–7）。
+> 截图原图在 `docs/screenshots/qoder/`，按对话发生时间排序；每条都对应 `qoder/` 目录里的真实文件与提交。
 
 ## 0. 账号与仓库信息
 
@@ -18,61 +14,61 @@
 | 主要开发目录 | `qoder/` |
 | 开发起止时间 | 2026-10-27 至 2026-10-29 |
 
-## 1. 需求拆解（会话脚本 1，截图待补）
+## 1. 会话总览
 
-**在 Qoder 中输入的起始需求（可直接复用）：**
+| # | 时间（2026-10-29） | 场景 | 截图 | 结果 |
+| --- | --- | --- | --- | --- |
+| 1 | 11:36 | 让 Sites 用 `site/index.html` 生成静态站点草稿 | `qoder-sites-01-preview.png` | 草稿生成成功，未发布 |
+| 2 | 11:46 | 修「代码仓库」按钮卡死 | `qoder-sites-02-link-fix.png` | 外链加 `target="_blank" rel="noopener noreferrer"` |
+| 3 | 11:46 | 定位按钮“卡住”的根因 | `qoder-sites-03-root-cause.png` | 链接本身有效；本机 `github.com` TCP 超时所致 |
+| 4 | 12:05 | 走查找真实缺陷：挖空卡把答案泄漏在题干 | `qoder-core-01-card-leak-fix.png` | 修 `app/coach.py`，补测试；`pytest -q` 30 passed |
+| 5 | 12:07 | 核对检索证据链中的 SQL | `qoder-core-02-retrieval-sql.png` | 向量/全文通道 SQL 均在位，无需改代码 |
+| 6 | 12:12 | 修 375px 横向溢出 | `qoder-core-03-mobile-overflow.png` | `site/index.html` 表格加 `.table-wrap`，溢出 164px→0 |
+| 7 | 12:13 | 前端失败提示中文化 | `qoder-core-04-fetch-errors.png` | `web/app.js` 网络失败/HTTP 错误改为可读中文 |
 
-> 我要参加 Qoder × OceanBase 比赛，做「知新 / Recall Coach」：个人学习复习教练。
-> 资料存 seekdb 做向量+全文混合检索，学习者薄弱点/偏好/进度存 PowerContext 并在下一轮复习复用。
-> 先给我一份 MVP 拆解：模块、接口、数据表、首次能跑通的演示路径；不要用额外的重型依赖。
+## 2. 站点发布（Qoder Sites）
 
-**请附：** 该轮对话截图（含 Qoder 给出的拆解结论）与随后创建的关键文件。
+发布方式：
 
-**落地产物对照：**
+1. 在 Qoder 中打开 Sites，选择 `qoder/site/` 作为静态站点根（`index.html` + `assets/`，全部相对路径）；
+2. 可见范围设为「任何人都可访问」；
+3. 发布后用无痕窗口打开 `https://recall-coach-uatkigmv89n.qoder.website` 确认；
+4. 对话截图见上表 1–3（图 1 生成草稿、图 2 修外链、图 3 根因说明）。
 
-| Qoder 输出 | 对应文件 |
-| --- | --- |
-| 模块划分（config / text / embedding / store / coach / main） | `qoder/app/*.py`、`qoder/app/store/*.py` |
-| 接口清单 | `README.md` 第 8 节 |
-| 演示路径 | `README.md` 第 6.2 节 |
+> 提交前注意：§3-C 又改了 `site/index.html`，Sites 里的旧草稿已过期，
+> 需要在 Sites 中重新生成草稿并点一次「发布」，让线上站点带上移动端修复。
 
-## 2. 检索底座：seekdb（会话脚本 2，截图待补）
+## 3. 核心功能联调
 
-**在 Qoder 中输入的后续需求：**
+### A. 挖空卡把答案泄漏在题干（图 4）
 
-> 用 pyobvector 的嵌入式模式接 seekdb：建 `coach_materials` 表（`VECTOR(1024)` + 全文列 + HNSW 索引），
-> 检索要同时走向量通道和全文通道，再用 RRF 融合，并把每条 SQL 记录下来给界面展示。
+- **现象**：真实样例里 2/9 张填空卡把答案泄漏在题干里（如「进程」在原文出现 6 次，只挖空第一处，其余仍可见）。
+- **Qoder 定位**：`app/coach.py:433` 的 `_answer_candidates` 只把「只出现一次」的词排到前面，重复词仍是候选；
+  `app/coach.py:458` 的 `_build_card` 无条件 `body.replace(answer, "____", 1)`，只挖掉第一处。
+- **修复**：只有恰好出现一次的候选词才允许挖空，否则走已有的「复述」回退分支：
+  `words = [word for word in keywords if cls._term_like(word, body) and body.count(word) == 1]`。
+- **回归测试**：`tests/test_coach.py::test_only_unique_terms_are_blanked`（重复词不挖空且回退标题；唯一词挖空且题干不含答案）。
+- **验证**：`pytest -q` → `30 passed`。
 
-**落地产物：**
+### B. 检索证据链的 SQL 核对（图 5）
 
-- `qoder/app/store/seekdb.py`：表结构、`l2_distance ... APPROXIMATE` 向量通道、`MATCH ... AGAINST` 全文通道、RRF 融合、证据日志；
-- `qoder/app/store/base.py`：`MaterialStore` 契约与 `fuse_rrf`；
-- `qoder/app/store/mirror.py`：无 seekdb 运行时的同契约镜像实现。
+- 8849 端口当时没有服务在监听，因此**没有**跑 `scripts/smoke.py`（如实记录，不写成已跑）。
+- 改为静态核对 `app/store/seekdb.py`：向量通道 `ORDER BY l2_distance(...) APPROXIMATE`（`seekdb.py:557`）、
+  全文通道 `MATCH(search_text) AGAINST(:query_text)`（`seekdb.py:619`、`seekdb.py:620`）均在位，无需修改。
+- 补充说明：Windows 上 `pylibseekdb` 无 wheel，`/api/evidence` 显示的是 mirror 后端的
+  `python: cosine_similarity …` / `python: BM25 …`，属预期降级，不是 seekdb 代码缺陷。
 
-**请附：** Qoder 中生成/修改上述文件的对话截图，以及一次「检索无结果 → 修正 SQL → 检索命中」的调试录屏。
+### C. 静态站点与前端质量（图 6–7）
 
-## 3. 记忆层：PowerContext（会话脚本 3，截图待补）
+- **375px 横向溢出 164px**：唯一溢出源是「技术分工」表格（最小内容宽 500px，来自不可断行 token）。
+  修复：`site/index.html:107` 新增 `.table-wrap { overflow-x: auto; }`，`site/index.html:226` 给表格包一层 `div.table-wrap`（纯容器，不改样式规则和文字）。
+  复测：320px / 375px 溢出归零，768px / 1200px 桌面布局不变。
+- **失败提示中文化**：`web/app.js:46` 把 `fetch` 网络异常转成「网络连接失败，请确认后端服务已启动」；
+  `web/app.js:62` 兜底文案改为「请求失败（HTTP n）」。所有 toast / 面板提示都走这两处。
 
-**在 Qoder 中输入的后续需求：**
+## 4. 调试对照表（工程侧修复，供交叉核对）
 
-> 用 PowerContext 的 HTTP API 管学习记忆：`memory/remember` 写薄弱点/偏好/进度，`memory/search` 召回，
-> `context/prepare` 组装下一轮复习上下文，`memory/entries/list` 渲染面板；
-> 修正/失效用 1.4.x 的 `atomic-memory/lifecycle`（`state=forgotten`）来失效旧条目、再写新条目。
-> 同时支持嵌入式（进程内起 Server）和外部 URL 两种模式。
-
-**落地产物：**
-
-- `qoder/app/pc_memory.py`：`LearnerMemory` 客户端、`ensure_modern_sqlite()`、scope 管理、嵌入式 Server 启动；
-- `qoder/app/coach.py`：写记忆、召回、`context/prepare` 的编排；
-- `qoder/web/app.js`：记忆面板与执行记录。
-
-**请附：** Qoder 中生成/修改上述文件的对话截图，以及一次「记忆写入 → 第二轮复习上下文出现该薄弱点」的录屏。
-
-## 4. 调试记录（会话脚本 4，截图待补）
-
-按时间顺序摘录 Qoder 中真实发生的调试对话，每条都写清「现象 → Qoder 定位 → 改动 → 验证」：
-
-| # | 现象 | Qoder 的定位/改动 | 验证方式 |
+| # | 现象 | 修复 | 验证方式 |
 | --- | --- | --- | --- |
 | 1 | seekdb 启动报 `Unknown database` | 先连默认 `test` 库再 `CREATE DATABASE IF NOT EXISTS` | `/api/status` 显示 `seekdb/embedded` |
 | 2 | 全文索引不存在导致检索降级 | 读取 `SHOW CREATE TABLE` 复用已有索引 parser，并按支持的 parser 依次重试 | `/api/status` 的 `fts_parser` 为 `ngram`，执行记录出现词法通道 |
@@ -80,69 +76,24 @@
 | 4 | `AVG(CAST(...) AS DOUBLE)` 别名丢失 | 先子查询再聚合 | `/api/status` 的课程统计正常 |
 | 5 | Windows 无 seekdb / PowerContext | 引入 mirror 后端与记忆离线降级 | `[SKIP]` 与 `[PASS]` 判定符合预期 |
 
-**请附：** 每条对应的 Qoder 对话截图；编号与上表一致，便于评审核对。
+## 5. 可选补录的会话脚本（本次未在 Qoder 中单独执行）
 
-## 5. 站点发布（Qoder Sites）— 已有真实截图
+核心功能的真实开发证据来自 §3 A/B/C；下面三段是更早的设计对话，**没有**在 Qoder 中单独跑过，
+仅作为如需补录时的可复用 prompt，评审请勿按“已执行”理解：
 
-以下 3 张是 Qoder 中真实发生的对话（原图见 `docs/screenshots/qoder/`）：
-
-| 截图 | 文件 | 内容 |
-| --- | --- | --- |
-| 图 1 | `docs/screenshots/qoder/qoder-sites-01-preview.png` | 让 Sites 用 `site/index.html` 生成静态站点预览（4 张截图 + demo.mp4/demo.gif 作为 assets，草稿未发布） |
-| 图 2 | `docs/screenshots/qoder/qoder-sites-02-link-fix.png` | 定位并修复「代码仓库」按钮卡住：外链加 `target="_blank" rel="noopener noreferrer"`，页面不被预览面板带走 |
-| 图 3 | `docs/screenshots/qoder/qoder-sites-03-root-cause.png` | 根因确认：链接本身有效（`Rst-tt/powercontext`、分支 `2026-competition-ecosystem`），是本机 `github.com` TCP 超时导致“看起来卡住” |
-
-站点操作步骤：
-
-1. 在 Qoder 中打开 Sites，选择 `site/index.html` 作为静态站点根；
-2. 可见范围设为「任何人都可访问」；
-3. 发布后用无痕窗口打开 `https://recall-coach-uatkigmv89n.qoder.website` 确认；
-4. 已发布版本的 3 张对话截图见上表。
-
-## 6. 核心功能开发会话（提交前补齐，3 段）
-
-> 现状：Qoder 里只有站点发布相关的 3 段对话。赛题基础验收要求「开发记录能够体现项目的主要功能由 Qoder 参与完成」，
-> 因此建议在提交前用 Qoder 再跑下面 3 段真实会话（每段 5–10 分钟，均会修改仓库内真实文件），并各截 1–2 张图。
+> 1) 我要做「知新 / Recall Coach」：资料存 seekdb 做向量+全文混合检索，学习者薄弱点/偏好/进度存 PowerContext 并在下一轮复习复用。给一份 MVP 拆解：模块、接口、数据表、首次演示路径，不要额外重型依赖。
 >
-> 截图统一放 `docs/screenshots/qoder/`，命名 `qoder-core-01.png` … `qoder-core-03.png`，再更新本文档。
+> 2) 用 pyobvector 嵌入式模式接 seekdb：建 `coach_materials` 表（`VECTOR(1024)` + 全文列 + HNSW 索引），检索同时走向量通道和全文通道，再用 RRF 融合，并把每条 SQL 记录下来给界面展示。
+>
+> 3) 用 PowerContext HTTP API 管学习记忆：`memory/remember` 写薄弱点/偏好/进度，`memory/search` 召回，`context/prepare` 组装下一轮复习上下文；修正/失效用 1.4.x 的 `atomic-memory/lifecycle`（`state=forgotten`）失效旧条目再写新条目。
 
-### 会话 A：代码走查 + 修一个真实缺陷（对应 `app/coach.py`、`tests/`）
+## 6. 提交清单勾选
 
-在 Qoder 中粘贴：
-
-> 阅读 `qoder/app/coach.py` 里 `_build_card`/`_answer_candidates` 与 `qoder/app/store/base.py` 的 `fuse_rrf`。
-> 找出至少 1 个真实缺陷或薄弱点（例如答案候选过滤不完整、RRF 去重边界），给出最小修复，
-> 并为它补一个 `tests/` 下的 pytest 用例；运行 `pytest -q` 确认通过后，说明改动点。
-
-预期产出：`coach.py` 或 `base.py` 的 diff + 1 个新测试。
-
-### 会话 B：验证脚本与证据链（对应 `scripts/smoke.py`、`/api/evidence`）
-
-在 Qoder 中粘贴：
-
-> 阅读 `qoder/scripts/smoke.py`。如果本机有服务在 `http://127.0.0.1:8849`，运行它并报告失败步骤；
-> 若全部通过，再检查 `/api/evidence` 返回的 SQL 是否包含 `APPROXIMATE` 与 `MATCH(...) AGAINST`，
-> 缺失则修复 `app/store/seekdb.py` 并重新运行 smoke，最后贴出关键输出。
-
-预期产出：smoke 输出（11/11）或一处检索链路修复。
-
-### 会话 C：静态站点与前端质量（对应 `site/index.html`、`web/app.js`）
-
-在 Qoder 中粘贴：
-
-> 检查 `qoder/site/index.html` 与 `qoder/web/app.js`：所有外链是否都带 `target="_blank"`；
-> 375px 宽度下是否有横向溢出；前端 fetch 失败时提示是否为可读中文。
-> 修复发现的问题，列出改动前后对比；不要改设计和文案。
-
-预期产出：`index.html` / `app.js` 的小幅 diff。
-
-## 7. 提交清单勾选
-
-- [ ] 项目网站 URL（公开可访问）
-- [ ] 代码仓库地址（公开或评审可访问）
-- [ ] 运行说明（`README.md` 第 5 节）
-- [ ] 验证样例（`scripts/smoke.py` 输出截图 + README 第 6.3 节实测记录）
-- [ ] Qoder 账号 UID 与本文档中的截图/录屏
+- [x] 项目网站 URL（公开可访问）
+- [x] 代码仓库地址（公开或评审可访问）
+- [x] 运行说明（`README.md` 第 5 节）
+- [x] 验证样例（`scripts/smoke.py` + README 第 6.3 节实测记录）
+- [x] Qoder 账号 UID 与本文档中的截图
 - [x] 站点发布对话截图 3 张（`docs/screenshots/qoder/qoder-sites-0*.png`）
-- [ ] 核心功能开发会话截图（第 6 节 A/B/C，提交前补齐）
+- [x] 核心功能联调截图 4 张（`docs/screenshots/qoder/qoder-core-0*.png`）
 - [ ] 使用效果材料（如有）

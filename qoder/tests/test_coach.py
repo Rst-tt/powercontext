@@ -141,6 +141,37 @@ def test_card_falls_back_to_title_without_terms(settings, store) -> None:
     assert "_material" in card and "answer" not in _public_card(card)
 
 
+def test_only_unique_terms_are_blanked(settings, store) -> None:
+    coach = _coach(settings, store, memory=None)
+
+    repeated = {
+        "id": "m_repeat",
+        "course": "操作系统",
+        "title": "进程与线程",
+        "body": "进程是资源分配的基本单位，进程也需要调度。",
+        "keywords": ["进程"],
+        "mastery": 0.0,
+        "reviews": 0,
+    }
+    card = coach._build_card(repeated, [])
+    assert "____" not in card["prompt"]
+    assert card["answer"] == "进程与线程"
+
+    unique = {
+        "id": "m_unique",
+        "course": "操作系统",
+        "title": "分页",
+        "body": "页表把进程的虚拟地址映射到物理页框。",
+        "keywords": ["页表"],
+        "mastery": 0.0,
+        "reviews": 0,
+    }
+    card = coach._build_card(unique, [])
+    assert "____" in card["prompt"]
+    assert card["answer"] == "页表"
+    assert card["answer"] not in card["prompt"]
+
+
 def test_start_session_without_materials_errors(settings, store) -> None:
     coach = _coach(settings, store, memory=None)
     with pytest.raises(ValueError):

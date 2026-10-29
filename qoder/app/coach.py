@@ -432,10 +432,16 @@ class Coach:
 
     @classmethod
     def _answer_candidates(cls, material: dict[str, Any], body: str) -> list[str]:
-        words = [word for word in (material.get("keywords") or []) if cls._term_like(word, body)]
-        # Prefer terms that occur exactly once: a blank with one occurrence has
-        # exactly one answer, so the card cannot be ambiguous.
-        words.sort(key=lambda word: (body.count(word) != 1, -len(word)))
+        # A blank is only unambiguous when the term occurs exactly once: blanking
+        # one of several occurrences leaves the rest visible and gives the answer
+        # away. Terms that repeat are therefore not candidates at all; without a
+        # unique term the card falls back to the recitation prompt.
+        words = [
+            word
+            for word in (material.get("keywords") or [])
+            if cls._term_like(word, body) and body.count(word) == 1
+        ]
+        words.sort(key=lambda word: -len(word))
         return words
 
     @staticmethod
